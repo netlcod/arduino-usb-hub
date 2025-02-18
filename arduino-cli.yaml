@@ -1,0 +1,17 @@
+# arduino-cli.yaml
+directories:
+  data: ./arduino-cli-data
+  downloads: ./arduino-cli-data/staging
+  user: ./arduino-cli-data/user
+  
+library:
+  enable_unsafe_install: false
+  install_path: ./arduino-cli-data/libraries
+
+board_manager:
+  additional_urls: []
+
+libraries:
+  - name: "Mouse"
+  - name: "Keyboard"
+  - name: "USB Host Shield Library 2.0"
