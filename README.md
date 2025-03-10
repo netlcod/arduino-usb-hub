@@ -80,4 +80,4 @@ In order to be able to update the firmware, it is necessary to reset Leonardo. T
 
 ## License
 
-This project is licensed under the GNU Lesser General Public License v3.0. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU General Public License v3.0. See the [LICENSE](LICENSE) file for details.
