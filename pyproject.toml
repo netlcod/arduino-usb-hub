@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arduino-hub"
+version = "1.0.0"
+description = "Arduino HID device emulator — clone, patch, compile and flash"
+requires-python = ">=3.9"
+dependencies = [
+    "hidapi",
+    "requests",
+]
+
+[project.scripts]
+arduino-hub = "arduino_hub.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

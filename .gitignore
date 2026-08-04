@@ -1,10 +1,8 @@
 # User files
-config.json
 arduino-cli-data/
 arduino-cli.exe
-arduino-cli_latest_Windows_64bit.zip
-arduino-cli_latest_Linux_64bit.tar.gz
-arduino-cli_latest_macOS_64bit.tar.gz
+arduino-cli_*_Windows_64bit.zip
+devices/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
