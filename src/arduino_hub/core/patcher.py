@@ -282,6 +282,10 @@ class USBPatcher:
                 content = content.replace(_MOUSE_CPP_OLD_MOVE, _MOUSE_CPP_NEW_MOVE)
                 logger.info("Mouse.cpp: move() rewritten to encode->SendReport")
 
+        if "Mouse_::buttons(uint16_t b)" not in content:
+            content = content.replace("uint8_t b)", "uint16_t b)")
+            logger.info("Mouse.cpp: buttons widened to uint16_t")
+
         mouse_cpp_file.write_text(content, encoding="utf-8")
 
         mouse_h_file = lib_path / "Mouse.h"
@@ -295,6 +299,12 @@ class USBPatcher:
                 )
                 mouse_h_file.write_text(content, encoding="utf-8")
                 logger.info("Mouse.h: move() signature updated")
+
+            if "uint16_t _buttons;" not in content:
+                content = content.replace("uint8_t _buttons;", "uint16_t _buttons;")
+                content = content.replace("uint8_t b", "uint16_t b")
+                mouse_h_file.write_text(content, encoding="utf-8")
+                logger.info("Mouse.h: buttons widened to uint16_t")
         else:
             logger.error("Mouse.h not found: %s", mouse_h_file)
 

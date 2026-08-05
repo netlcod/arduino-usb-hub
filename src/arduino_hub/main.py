@@ -61,8 +61,8 @@ def main() -> None:
     )
     p_patch.add_argument(
         "--target",
-        default="g305",
-        help="Target profile name (default: g305)",
+        default="generic_3btn",
+        help="Target profile name (default: generic_3btn)",
     )
     _add_global_opts(p_patch)
 
@@ -85,8 +85,8 @@ def main() -> None:
     )
     p_flash.add_argument(
         "--target",
-        default="g305",
-        help="Target profile name (default: g305)",
+        default="generic_3btn",
+        help="Target profile name (default: generic_3btn)",
     )
     p_flash.add_argument(
         "--sketch", required=True, type=Path, help="Path to .ino sketch"

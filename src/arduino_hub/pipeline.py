@@ -100,7 +100,7 @@ def _patch_for_device(
             "HID.h": f"bcdHID 0x{device.bcd_hid:X}",
             "HID.cpp": "subclass 1 / protocol 2 (boot mouse policy)",
             "Mouse.cpp": "includes + move() decode->encode->SendReport",
-            "Mouse.h": "move(int16_t x, int16_t y, int16_t wheel, int16_t pan)",
+            "Mouse.h": "move(int16_t x, int16_t y, int16_t wheel, int16_t pan), uint16_t buttons",
         },
     )
 

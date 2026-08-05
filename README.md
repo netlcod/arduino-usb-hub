@@ -111,10 +111,17 @@ Applies both patches to the installed AVR core:
 arduino-hub patch --device mydevice --target generic_3btn
 ```
 
-`--target` selects the output profile from `targets/` (default `g305`):
-`generic_3btn` presents a standard 3-button mouse, `g305` reproduces the
-native 9-byte report. Patching also generates `hid_profile.h`/`hid_mapper.h`
-into the Mouse library and writes a manifest to `.build/patches.json`.
+`--target` selects the output profile from `targets/` (default `generic_3btn`):
+
+| Target | Presents to the PC |
+|--------|--------------------|
+| `generic_3btn` | Standard 3-button mouse (L/R/M + wheel), Arduino Mouse-compatible |
+| `generic_5btn` | 5-button mouse — buttons 4/5 become XButton1 (Back) / XButton2 (Forward) |
+| `generic_16btn` | Full clone: 16 buttons, 16-bit X/Y, wheel, AC Pan, Report ID 2 (pass-through) |
+
+Patching also generates `hid_profile.h`/`hid_mapper.h` into the Mouse library
+and writes a manifest to `.build/patches.json`. Re-patching with a different
+`--target` swaps only the generated headers; all edits are idempotent.
 
 Requires `setup` to have been run previously (core must be installed).
 
@@ -145,7 +152,7 @@ arduino-hub flash --device mydevice --sketch examples/mouse/mouse.ino --port COM
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--device` | *(required)* | Device name from `clone` |
-| `--target` | `g305` | Target profile name from `targets/` |
+| `--target` | `generic_3btn` | Target profile name from `targets/` |
 | `--sketch` | *(required)* | Path to `.ino` file |
 | `--port` | *(required)* | COM port (e.g. `COM6`) |
 | `--fqbn` | `arduino:avr:leonardo` | Fully Qualified Board Name |
@@ -171,8 +178,10 @@ connects to your PC via its native USB port.
 
 The `examples/mouse/` directory contains a reference sketch that uses the
 [USB Host Shield Library 2.0](https://github.com/felis/USB_Host_Shield_2.0) to
-forward mouse HID reports from the cloned device to the Leonardo's built-in HID
-peripheral.
+read the cloned device's HID reports (report protocol) and forward them to the
+Leonardo's built-in HID peripheral. The raw reports are translated by the
+generated `hid_mapper.h` (`decode_input()` on the host side, `encode_output()`
+in the Mouse library) into the target report format.
 
 Copy and adapt it for your own device.
 
@@ -199,6 +208,8 @@ The bootloader will create a temporary COM port during those few seconds.
 | Upload fails with `can't open device` | Wrong COM port, or Leonardo is not in bootloader mode |
 | Sketch compiles but upload fails on first attempt | The bootloader may need ~2 seconds after reset. Try running `flash` again |
 | Cursor moves right when moving the mouse down (axes swapped) | Source device sends X before Y in report data. Swap the `data_index` values for X/Y in `devices/<name>.json` and re-run `patch`/`flash` |
+| Right button does nothing, and the cursor freezes while it is held | Report ID byte was stripped twice (button byte `0x02` equals the report ID). Regenerate with a current `hid_mapper.h` — `decode_input()` detects the ID byte by report length |
+| Side buttons do nothing in Windows | The 3-button target masks them out. Re-patch with `--target generic_5btn` (or `generic_16btn` for the full profile) and re-flash |
 
 ## Project structure
 
