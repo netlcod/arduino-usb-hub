@@ -43,9 +43,15 @@ def main() -> None:
     p_setup = sub.add_parser("setup", help="Initialize Arduino CLI and AVR core")
     _add_global_opts(p_setup)
 
-    p_clone = sub.add_parser("clone", help="Clone HID device descriptor")
+    p_clone = sub.add_parser("clone", help="Clone device from a USB Device Tree Viewer report")
     p_clone.add_argument(
-        "--name", required=True, help="Device name for saving (e.g. 'g102')"
+        "--name", required=True, help="Device name for saving (e.g. 'g305')"
+    )
+    p_clone.add_argument(
+        "--report",
+        required=True,
+        type=Path,
+        help="Path to a USB Device Tree Viewer report (.txt)",
     )
     _add_global_opts(p_clone)
 
@@ -93,7 +99,7 @@ def main() -> None:
         if args.command == "setup":
             cmd_setup(base_dir, args.cli_version, args.core_version)
         elif args.command == "clone":
-            cmd_clone(base_dir, args.name)
+            cmd_clone(base_dir, args.name, args.report)
         elif args.command == "patch":
             cmd_patch(base_dir, args.device, args.cli_version, args.core_version)
         elif args.command == "compile":

@@ -6,7 +6,7 @@ from arduino_hub.cli.manager import ArduinoCLIManager
 from arduino_hub.core.installer import ArduinoCoreInstaller
 from arduino_hub.core.patcher import USBPatcher
 from arduino_hub.devices import load as load_device, save as save_device
-from arduino_hub.usbhid.enumerator import HIDEnumerator
+from arduino_hub.usbhid.descriptor_reader import parse_report
 
 logger = logging.getLogger(__name__)
 
@@ -42,19 +42,23 @@ def _read_libraries(base_dir: Path) -> list[str]:
     return _LIB_RE.findall(content)
 
 
-def cmd_clone(base_dir: Path, name: str) -> None:
+def cmd_clone(base_dir: Path, name: str, report: Path) -> None:
     logger.info("=== Step: Clone device '%s' ===", name)
 
-    devices = HIDEnumerator.enumerate()
-    if not devices:
-        logger.error("No HID devices found. Check USB connections.")
+    report = report.resolve()
+    if not report.exists():
+        logger.error("Report not found: %s", report)
         return
 
-    device = HIDEnumerator.select_interactive(devices)
+    device = parse_report(report)
+    if device is None:
+        logger.error("Failed to parse report: %s", report)
+        return
+
     save_device(device, name, base_dir)
 
     logger.info(
-        "Device '%s' cloned: %04X:%04X %s",
+        "Device '%s' cloned from report: %04X:%04X %s",
         name,
         device.vendor_id,
         device.product_id,

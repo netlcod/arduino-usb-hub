@@ -44,7 +44,8 @@ class HIDEnumerator:
             raise DeviceCloneError("Invalid index (not a number)")
 
         if idx < 0 or idx >= len(devices):
-            raise DeviceCloneError(f"Index out of range [0, {len(devices) - 1}]")
+            raise DeviceCloneError(
+                f"Index out of range [0, {len(devices) - 1}]")
 
         return HIDEnumerator._open_and_read_strings(devices[idx])
 
