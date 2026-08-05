@@ -77,7 +77,7 @@ Lists all connected HID devices, lets you pick one interactively, opens it to
 read descriptors, and saves everything to `devices/<name>.json`.
 
 ```bash
-arduino-hub clone --name mydevice
+arduino-hub clone --name mydevice --report devices/reports/usb-report.txt
 ```
 
 The saved JSON file contains:
@@ -93,6 +93,12 @@ The saved JSON file contains:
 }
 ```
 
+If the source device sends its X/Y axis data in a different order than the
+report suggests (known for some Logitech receivers), swap the `data_index`
+values of the X (`0x30`) and Y (`0x31`) entries in `devices/<name>.json`
+manually. Re-running `clone` restores the reported order, so repeat the fix
+after re-cloning.
+
 ### `patch`
 
 Applies both patches to the installed AVR core:
@@ -102,8 +108,13 @@ Applies both patches to the installed AVR core:
   `boards.txt` (skipped if already matching).
 
 ```bash
-arduino-hub patch --device mydevice
+arduino-hub patch --device mydevice --target generic_3btn
 ```
+
+`--target` selects the output profile from `targets/` (default `g305`):
+`generic_3btn` presents a standard 3-button mouse, `g305` reproduces the
+native 9-byte report. Patching also generates `hid_profile.h`/`hid_mapper.h`
+into the Mouse library and writes a manifest to `.build/patches.json`.
 
 Requires `setup` to have been run previously (core must be installed).
 
@@ -134,6 +145,7 @@ arduino-hub flash --device mydevice --sketch examples/mouse/mouse.ino --port COM
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--device` | *(required)* | Device name from `clone` |
+| `--target` | `g305` | Target profile name from `targets/` |
 | `--sketch` | *(required)* | Path to `.ino` file |
 | `--port` | *(required)* | COM port (e.g. `COM6`) |
 | `--fqbn` | `arduino:avr:leonardo` | Fully Qualified Board Name |
@@ -186,6 +198,7 @@ The bootloader will create a temporary COM port during those few seconds.
 | `Device 'X' not found` | Run `arduino-hub clone --name X` first |
 | Upload fails with `can't open device` | Wrong COM port, or Leonardo is not in bootloader mode |
 | Sketch compiles but upload fails on first attempt | The bootloader may need ~2 seconds after reset. Try running `flash` again |
+| Cursor moves right when moving the mouse down (axes swapped) | Source device sends X before Y in report data. Swap the `data_index` values for X/Y in `devices/<name>.json` and re-run `patch`/`flash` |
 
 ## Project structure
 

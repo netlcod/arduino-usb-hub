@@ -21,6 +21,29 @@ class HIDReportDescriptor:
 
 
 @dataclass
+class AxisSpec:
+    """A single HID value field (axis) in a report."""
+    usage: int = 0x30
+    bits: int = 8
+    logical_min: int = -127
+    logical_max: int = 127
+    usage_page: int = 0x01
+    relative: bool = True
+    data_index: int = 0
+
+
+@dataclass
+class TargetProfile:
+    """Output HID profile: the report the Leonardo will present to the PC."""
+    name: str = ""
+    report_id: int = 1
+    report_length: int = 4
+    buttons: int = 3
+    layout: str = "per_axis"
+    axes: list[AxisSpec] = field(default_factory=list)
+
+
+@dataclass
 class DeviceInfo:
     """Full USB HID device descriptor data for cloning."""
 
@@ -57,6 +80,7 @@ class DeviceInfo:
     report_id: int = 1
     report_length: int = 4
     button_count: int = 3
+    axes: list[AxisSpec] = field(default_factory=list)
 
     # ── Strings ─────────────────────────────────────────
     manufacturer_string: str = ""

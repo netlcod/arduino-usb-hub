@@ -1,35 +1,25 @@
-#if!defined(__HIDMOUSERPTPARSER_H__)
+#if !defined(__HIDMOUSERPTPARSER_H__)
 #define __HIDMOUSERPTPARSER_H__
 
 #include <hidboot.h>
+#include <hid_mapper.h>
 
-#define CHECK_BIT(var, pos)((var) & pos)
-#define MOUSE_LEFT 1
-#define MOUSE_RIGHT 2
-#define MOUSE_MIDDLE 4
-#define MOUSE_PREV 8
-#define MOUSE_NEXT 16
+// Temporary debug: dump the first 20 reports as hex to Serial (USB CDC).
+// Needs the unpatched core (CDC enabled) to run; set to 0 for patched builds.
+#define HUB_DEBUG_DUMP 0
 
-struct CUSTOMMOUSEINFO {
-  uint8_t buttons;
-  int8_t dX;
-  int8_t dY;
-  int8_t dZ;
-};
+// Temporary diagnostic: each button press moves the cursor right by
+// (button_bit * 8) px, so the movement distance reveals the button bit.
+// The board blinks its LED 3 times at startup when this is enabled.
+#define HUB_BUTTON_MARKER 0
 
 void onButtonUp(uint16_t id);
 void onButtonDown(uint16_t id);
-void onMouseMove(int8_t xMovement, int8_t yMovement, int8_t scrollValue);
+void onMouseMove(int16_t xMovement, int16_t yMovement, int16_t scrollValue, int16_t panValue);
 
-class MouseRptParser: public MouseReportParser {
-  union {
-    CUSTOMMOUSEINFO mouseInfo;
-    uint8_t bInfo[sizeof(CUSTOMMOUSEINFO)];
-  }
-  prevState;
-
-  public:
-    void Parse(USBHID * hid, bool is_rpt_id, uint8_t len, uint8_t * buf);
+class MouseRptParser : public HIDReportParser {
+public:
+  void Parse(USBHID* hid, bool is_rpt_id, uint8_t len, uint8_t* buf);
 };
 
-#endif //__HIDMOUSERPTPARSER_H__
+#endif // __HIDMOUSERPTPARSER_H__

@@ -15,5 +15,10 @@ dependencies = [
 [project.scripts]
 arduino-hub = "arduino_hub.main:main"
 
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]

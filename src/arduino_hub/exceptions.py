@@ -39,6 +39,10 @@ class DeviceNotFoundError(ArduinoHubError):
     """Device info not found in devices/ directory."""
 
 
+class TargetNotFoundError(ArduinoHubError):
+    """Target profile not found in targets/ directory."""
+
+
 class DeviceCloneError(ArduinoHubError):
     """Failed to clone HID device info."""
 

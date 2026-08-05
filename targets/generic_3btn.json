@@ -1,0 +1,33 @@
+{
+  "name": "generic_3btn",
+  "report_id": 1,
+  "report_length": 4,
+  "buttons": 3,
+  "layout": "arduino",
+  "axes": [
+    {
+      "usage_page": "0x01",
+      "usage": "0x30",
+      "bits": 8,
+      "logical_min": -127,
+      "logical_max": 127,
+      "relative": true
+    },
+    {
+      "usage_page": "0x01",
+      "usage": "0x31",
+      "bits": 8,
+      "logical_min": -127,
+      "logical_max": 127,
+      "relative": true
+    },
+    {
+      "usage_page": "0x01",
+      "usage": "0x38",
+      "bits": 8,
+      "logical_min": -127,
+      "logical_max": 127,
+      "relative": true
+    }
+  ]
+}

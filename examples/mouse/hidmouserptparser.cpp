@@ -1,62 +1,48 @@
 #include "hidmouserptparser.h"
 
-void MouseRptParser::Parse(USBHID * hid __attribute__((unused)), bool is_rpt_id __attribute__((unused)), uint8_t len __attribute__((unused)), uint8_t * buf) {
-  CUSTOMMOUSEINFO * pmi = (CUSTOMMOUSEINFO * ) buf;
+#if HUB_DEBUG_DUMP
+static uint8_t debugReports = 0;
+#endif
 
-  if (CHECK_BIT(prevState.mouseInfo.buttons, MOUSE_LEFT) != CHECK_BIT(pmi -> buttons, MOUSE_LEFT)) {
-    if (CHECK_BIT(pmi -> buttons, MOUSE_LEFT)) {
-      onButtonDown(MOUSE_LEFT);
-    } else {
-      onButtonUp(MOUSE_LEFT);
+static uint16_t prevButtons = 0;
+
+void MouseRptParser::Parse(USBHID* hid __attribute__((unused)), bool is_rpt_id __attribute__((unused)), uint8_t len, uint8_t* buf) {
+#if HUB_DEBUG_DUMP
+  if (debugReports < 20) {
+    Serial.print("RPT");
+    for (uint8_t i = 0; i < len; i++) {
+      Serial.print(' ');
+      if (buf[i] < 0x10) Serial.print('0');
+      Serial.print(buf[i], HEX);
+    }
+    Serial.println();
+    debugReports++;
+  }
+#endif
+
+  if (len == 0) return;
+
+  // decode_input() strips the report ID byte itself (detected by length);
+  // stripping it here too would corrupt reports where buttons == report id.
+  MouseState state;
+  if (!decode_input(buf, len, state)) return;
+
+  uint16_t changed = prevButtons ^ state.buttons;
+  for (uint16_t bit = 1; bit != 0; bit <<= 1) {
+    if (changed & bit) {
+      if (state.buttons & bit) {
+        onButtonDown(bit);
+#if HUB_BUTTON_MARKER
+        onMouseMove((int16_t)(bit * 8), 0, 0, 0);
+#endif
+      } else {
+        onButtonUp(bit);
+      }
     }
   }
+  prevButtons = state.buttons;
 
-  if (CHECK_BIT(prevState.mouseInfo.buttons, MOUSE_RIGHT) != CHECK_BIT(pmi -> buttons, MOUSE_RIGHT)) {
-    if (CHECK_BIT(pmi -> buttons, MOUSE_RIGHT)) {
-      onButtonDown(MOUSE_RIGHT);
-    } else {
-      onButtonUp(MOUSE_RIGHT);
-    }
+  if (state.x != 0 || state.y != 0 || state.wheel != 0 || state.pan != 0) {
+    onMouseMove(state.x, state.y, state.wheel, state.pan);
   }
-
-  if (CHECK_BIT(prevState.mouseInfo.buttons, MOUSE_MIDDLE) != CHECK_BIT(pmi -> buttons, MOUSE_MIDDLE)) {
-    if (CHECK_BIT(pmi -> buttons, MOUSE_MIDDLE)) {
-      onButtonDown(MOUSE_MIDDLE);
-    } else {
-      onButtonUp(MOUSE_MIDDLE);
-    }
-  }
-
-  if (CHECK_BIT(prevState.mouseInfo.buttons, MOUSE_PREV) != CHECK_BIT(pmi -> buttons, MOUSE_PREV)) {
-    if (CHECK_BIT(pmi -> buttons, MOUSE_PREV)) {
-      onButtonDown(MOUSE_PREV);
-    } else {
-      onButtonUp(MOUSE_PREV);
-    }
-  }
-
-  if (CHECK_BIT(prevState.mouseInfo.buttons, MOUSE_NEXT) != CHECK_BIT(pmi -> buttons, MOUSE_NEXT)) {
-    if (CHECK_BIT(pmi -> buttons, MOUSE_NEXT)) {
-      onButtonDown(MOUSE_NEXT);
-    } else {
-      onButtonUp(MOUSE_NEXT);
-    }
-  }
-
-  int8_t xMovement = pmi -> dX;
-  int8_t yMovement = pmi -> dY;
-  int8_t scrollValue = pmi -> dZ;
-
-  if (xMovement > 127) {
-    xMovement -= 256;
-  }
-  if (yMovement > 127) {
-    yMovement -= 256;
-  }
-
-  if (xMovement != 0 || yMovement != 0 || scrollValue != 0) {
-    onMouseMove(xMovement, yMovement, scrollValue);
-  }
-
-  prevState.bInfo[0] = buf[0];
 };

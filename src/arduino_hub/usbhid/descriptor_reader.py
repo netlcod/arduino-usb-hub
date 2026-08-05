@@ -23,7 +23,7 @@ import re
 from dataclasses import asdict
 from typing import Any
 
-from arduino_hub.usbhid.device_info import DeviceInfo, HIDReportDescriptor, HIDCollection
+from arduino_hub.usbhid.device_info import DeviceInfo, HIDReportDescriptor, HIDCollection, AxisSpec
 
 logger = logging.getLogger(__name__)
 
@@ -362,10 +362,10 @@ class ReportParser:
             v = _parse_hex_field(block, "UsageMax")
             if v is not None:
                 caps.usage_max = v
-            v = _parse_dec_field(block, "DataIndexMin")
+            v = _parse_hex_field(block, "DataIndexMin")
             if v is not None:
                 caps.data_index_min = v
-            v = _parse_dec_field(block, "DataIndexMax")
+            v = _parse_hex_field(block, "DataIndexMax")
             if v is not None:
                 caps.data_index_max = v
             result.append(caps)
@@ -405,7 +405,7 @@ class ReportParser:
             m = re.search(r"LogicalMax\s*:\s*(0x[0-9A-Fa-f]+)\s*\((\+?\d+)\)", block)
             if m:
                 caps.logical_max = int(m.group(2))
-            v = _parse_dec_field(block, "DataIndex")
+            v = _parse_hex_field(block, "DataIndex")
             if v is not None:
                 caps.data_index = v
             result.append(caps)
@@ -578,6 +578,20 @@ class ReportParser:
         # Reconstruct raw HID Report Descriptor
         raw_report = self.reconstruct_report_descriptor(mouse_caps)
 
+        # Axis fields, in report order (already sorted by DataIndex)
+        axes = [
+            AxisSpec(
+                usage_page=vc.usage_page,
+                usage=vc.usage,
+                bits=vc.bit_size,
+                logical_min=vc.logical_min,
+                logical_max=vc.logical_max,
+                relative=vc.is_relative,
+                data_index=vc.data_index,
+            )
+            for vc in mouse_caps.get("value_caps", [])
+        ]
+
         # Build DeviceInfo
         info = DeviceInfo(
             vendor_id=dev_desc.get("vendor_id") or summary.get("vendor_id") or 0,
@@ -600,6 +614,7 @@ class ReportParser:
             report_id=mouse_caps.get("report_id") or 1,
             report_length=mouse_caps.get("report_length") or 4,
             button_count=mouse_caps.get("button_count") or 3,
+            axes=axes,
             manufacturer_string=(
                 strings.get("manufacturer_string")
                 or summary.get("manufacturer_string") or ""

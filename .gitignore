@@ -3,6 +3,7 @@ arduino-cli-data/
 arduino-cli.exe
 arduino-cli_*_Windows_64bit.zip
 devices/
+.build/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 from arduino_hub.exceptions import DeviceNotFoundError
-from arduino_hub.usbhid.device_info import DeviceInfo, HIDReportDescriptor, HIDCollection
+from arduino_hub.usbhid.device_info import DeviceInfo, HIDReportDescriptor, HIDCollection, AxisSpec
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,18 @@ def _to_dict(device: DeviceInfo, name: str) -> dict:
         "report_id": device.report_id,
         "report_length": device.report_length,
         "button_count": device.button_count,
+        "axes": [
+            {
+                "usage_page": _fmt_hex(a.usage_page),
+                "usage": _fmt_hex(a.usage),
+                "bits": a.bits,
+                "logical_min": a.logical_min,
+                "logical_max": a.logical_max,
+                "relative": a.relative,
+                "data_index": a.data_index,
+            }
+            for a in device.axes
+        ],
         # Strings
         "manufacturer_string": device.manufacturer_string,
         "product_string": device.product_string,
@@ -110,6 +122,19 @@ def _from_dict(data: dict) -> DeviceInfo:
             collections=collections,
         ))
 
+    axes = [
+        AxisSpec(
+            usage_page=_parse_hex(a.get("usage_page", "0x01")),
+            usage=_parse_hex(a["usage"]),
+            bits=a.get("bits", 8),
+            logical_min=a.get("logical_min", -127),
+            logical_max=a.get("logical_max", 127),
+            relative=a.get("relative", True),
+            data_index=a.get("data_index", 0),
+        )
+        for a in data.get("axes", [])
+    ]
+
     return DeviceInfo(
         name=data.get("name", ""),
         vendor_id=_parse_hex(data["vendor_id"]),
@@ -133,6 +158,7 @@ def _from_dict(data: dict) -> DeviceInfo:
         report_id=data.get("report_id", 1),
         report_length=data.get("report_length", 4),
         button_count=data.get("button_count", 3),
+        axes=axes,
         manufacturer_string=data.get("manufacturer_string", ""),
         product_string=data.get("product_string", ""),
         serial_number=data.get("serial_number") or None,

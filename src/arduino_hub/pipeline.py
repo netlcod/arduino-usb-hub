@@ -4,8 +4,13 @@ from pathlib import Path
 
 from arduino_hub.cli.manager import ArduinoCLIManager
 from arduino_hub.core.installer import ArduinoCoreInstaller
-from arduino_hub.core.patcher import USBPatcher
+from arduino_hub.core.patcher import (
+    MOUSE_LIB_RELATIVE,
+    USBPatcher,
+    write_patch_manifest,
+)
 from arduino_hub.devices import load as load_device, save as save_device
+from arduino_hub.targets import load_target
 from arduino_hub.usbhid.descriptor_reader import parse_report
 
 logger = logging.getLogger(__name__)
@@ -66,15 +71,48 @@ def cmd_clone(base_dir: Path, name: str, report: Path) -> None:
     )
 
 
+def _patch_for_device(
+    base_dir: Path,
+    device_name: str,
+    target_name: str,
+    core_path: Path,
+) -> None:
+    device = load_device(device_name, base_dir)
+    target = load_target(target_name, base_dir)
+
+    USBPatcher.patch_usb_core(core_path)
+    USBPatcher.patch_boards_txt(core_path, device)
+    USBPatcher.patch_usbcore(core_path, device)
+    USBPatcher.patch_hid(core_path, device)
+
+    lib_path = base_dir / MOUSE_LIB_RELATIVE
+    USBPatcher.patch_mouse_library(lib_path, device, target)
+
+    write_patch_manifest(
+        base_dir,
+        device_name,
+        target_name,
+        {
+            "boards.txt": f"VID/PID {device.vendor_id:04X}:{device.product_id:04X}, "
+                          f"strings, CDC_DISABLED, USB_EP_SIZE=16, "
+                          f"USB_CONFIG_POWER={device.max_power_ma}",
+            "USBCore.cpp": f"bcdDevice 0x{device.bcd_device:X}, iSerialNumber 0",
+            "HID.h": f"bcdHID 0x{device.bcd_hid:X}",
+            "HID.cpp": "subclass 1 / protocol 2 (boot mouse policy)",
+            "Mouse.cpp": "includes + move() decode->encode->SendReport",
+            "Mouse.h": "move(int16_t x, int16_t y, int16_t wheel, int16_t pan)",
+        },
+    )
+
+
 def cmd_patch(
     base_dir: Path,
     device_name: str,
+    target_name: str,
     cli_version: str,
     core_version: str,
 ) -> None:
-    logger.info("=== Step: Patch for device '%s' ===", device_name)
-
-    device = load_device(device_name, base_dir)
+    logger.info("=== Step: Patch for device '%s', target '%s' ===", device_name, target_name)
 
     mgr = ArduinoCLIManager(base_dir, cli_version)
     executor = mgr.ensure_cli()
@@ -82,10 +120,9 @@ def cmd_patch(
     installer = ArduinoCoreInstaller(executor, base_dir)
     core_path = installer.ensure_version(core_version)
 
-    USBPatcher.patch_usb_core(core_path)
-    USBPatcher.patch_boards_txt(core_path, device)
+    _patch_for_device(base_dir, device_name, target_name, core_path)
 
-    logger.info("Patch complete for '%s'.", device_name)
+    logger.info("Patch complete for '%s' (target '%s').", device_name, target_name)
 
 
 def cmd_compile(
@@ -120,6 +157,7 @@ def cmd_compile(
 def cmd_flash(
     base_dir: Path,
     device_name: str,
+    target_name: str,
     sketch: Path,
     port: str,
     fqbn: str,
@@ -139,10 +177,7 @@ def cmd_flash(
     installer = ArduinoCoreInstaller(executor, base_dir)
     core_path = installer.ensure_version(core_version)
 
-    USBPatcher.patch_usb_core(core_path)
-
-    device = load_device(device_name, base_dir)
-    USBPatcher.patch_boards_txt(core_path, device)
+    _patch_for_device(base_dir, device_name, target_name, core_path)
 
     executor.compile(sketch, fqbn)
     executor.upload(sketch, port, fqbn)

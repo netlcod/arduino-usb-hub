@@ -59,6 +59,11 @@ def main() -> None:
     p_patch.add_argument(
         "--device", required=True, help="Device name (from clone)"
     )
+    p_patch.add_argument(
+        "--target",
+        default="g305",
+        help="Target profile name (default: g305)",
+    )
     _add_global_opts(p_patch)
 
     p_compile = sub.add_parser("compile", help="Compile sketch")
@@ -77,6 +82,11 @@ def main() -> None:
     )
     p_flash.add_argument(
         "--device", required=True, help="Device name (from clone)"
+    )
+    p_flash.add_argument(
+        "--target",
+        default="g305",
+        help="Target profile name (default: g305)",
     )
     p_flash.add_argument(
         "--sketch", required=True, type=Path, help="Path to .ino sketch"
@@ -101,7 +111,7 @@ def main() -> None:
         elif args.command == "clone":
             cmd_clone(base_dir, args.name, args.report)
         elif args.command == "patch":
-            cmd_patch(base_dir, args.device, args.cli_version, args.core_version)
+            cmd_patch(base_dir, args.device, args.target, args.cli_version, args.core_version)
         elif args.command == "compile":
             cmd_compile(
                 base_dir,
@@ -114,6 +124,7 @@ def main() -> None:
             cmd_flash(
                 base_dir,
                 args.device,
+                args.target,
                 args.sketch,
                 args.port,
                 args.fqbn,

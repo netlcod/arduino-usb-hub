@@ -1,0 +1,41 @@
+{
+  "name": "g305",
+  "report_id": 2,
+  "report_length": 8,
+  "buttons": 16,
+  "layout": "per_axis",
+  "axes": [
+    {
+      "usage_page": "0x01",
+      "usage": "0x31",
+      "bits": 16,
+      "logical_min": -32767,
+      "logical_max": 32767,
+      "relative": true
+    },
+    {
+      "usage_page": "0x01",
+      "usage": "0x30",
+      "bits": 16,
+      "logical_min": -32767,
+      "logical_max": 32767,
+      "relative": true
+    },
+    {
+      "usage_page": "0x01",
+      "usage": "0x38",
+      "bits": 8,
+      "logical_min": -127,
+      "logical_max": 127,
+      "relative": true
+    },
+    {
+      "usage_page": "0x0C",
+      "usage": "0x0238",
+      "bits": 8,
+      "logical_min": -127,
+      "logical_max": 127,
+      "relative": true
+    }
+  ]
+}
