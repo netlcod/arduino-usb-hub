@@ -43,6 +43,14 @@ class TargetNotFoundError(ArduinoHubError):
     """Target profile not found in targets/ directory."""
 
 
+class InvalidTargetError(ArduinoHubError):
+    """Target profile failed validation against its report layout."""
+
+
+class CommandSchemaError(ArduinoHubError):
+    """Command protocol schema is invalid or not found."""
+
+
 class DeviceCloneError(ArduinoHubError):
     """Failed to clone HID device info."""
 

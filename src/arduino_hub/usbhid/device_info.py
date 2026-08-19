@@ -22,7 +22,15 @@ class HIDReportDescriptor:
 
 @dataclass
 class AxisSpec:
-    """A single HID value field (axis) in a report."""
+    """A single HID value field (axis) in a report.
+
+    For source profiles (devices/*.json) `data_index` is the
+    descriptor ordinal as reported by USB Tree Viewer, while
+    `wire_order` is the physical field sequence in the report data.
+    Some devices (e.g. G305 receiver) send X before Y although the
+    descriptor lists Y first; `wire_order` is the explicit, validated
+    override for that quirk.
+    """
     usage: int = 0x30
     bits: int = 8
     logical_min: int = -127
@@ -30,17 +38,39 @@ class AxisSpec:
     usage_page: int = 0x01
     relative: bool = True
     data_index: int = 0
+    wire_order: int = 0
+
+
+@dataclass
+class CommandProfile:
+    """PC → Arduino command channel wiring (per target).
+
+    report_id / report_length are fixed constants of the command
+    protocol, they are not configurable here.
+    """
+    enabled: bool = False
+    transport: str = "feature"  # "feature" | "output" | "interrupt_out"
+    queue_slots: int = 4
+
+
+@dataclass
+class CapabilityProfile:
+    """Optional meta-level capability report (GET_REPORT Feature)."""
+    enabled: bool = False
 
 
 @dataclass
 class TargetProfile:
     """Output HID profile: the report the Leonardo will present to the PC."""
     name: str = ""
+    device_kind: str = "mouse"  # "mouse" | "keyboard" | "gamepad"
     report_id: int = 1
     report_length: int = 4
     buttons: int = 3
     layout: str = "per_axis"
     axes: list[AxisSpec] = field(default_factory=list)
+    command: CommandProfile = field(default_factory=CommandProfile)
+    capability: CapabilityProfile = field(default_factory=CapabilityProfile)
 
 
 @dataclass

@@ -9,9 +9,9 @@ untested; these tests pin the report bytes for every target profile.
 import re
 from pathlib import Path
 
-from arduino_hub.devices import load as load_device
 from arduino_hub.targets import load_target
 from arduino_hub.usbhid.hid_generator import USAGE_FIELD, generate_hid_mapper_h
+from util import load_g305
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -58,7 +58,7 @@ def _encode(header, target, buttons, x, y, wheel, pan) -> bytes:
 
 def _mapper(source_name: str, target_name: str):
     return generate_hid_mapper_h(
-        load_device(source_name, REPO_ROOT),
+        load_g305(),
         load_target(target_name, REPO_ROOT),
     )
 

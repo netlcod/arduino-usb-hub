@@ -90,6 +90,7 @@ def _to_dict(device: DeviceInfo, name: str) -> dict:
                 "logical_max": a.logical_max,
                 "relative": a.relative,
                 "data_index": a.data_index,
+                "wire_order": a.wire_order,
             }
             for a in device.axes
         ],
@@ -131,6 +132,9 @@ def _from_dict(data: dict) -> DeviceInfo:
             logical_max=a.get("logical_max", 127),
             relative=a.get("relative", True),
             data_index=a.get("data_index", 0),
+            # Backward compat: pre-wire_order profiles used data_index as
+            # the (possibly hand-swapped) wire sort key.
+            wire_order=a.get("wire_order", a.get("data_index", 0)),
         )
         for a in data.get("axes", [])
     ]

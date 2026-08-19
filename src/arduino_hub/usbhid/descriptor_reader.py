@@ -24,6 +24,7 @@ from dataclasses import asdict
 from typing import Any
 
 from arduino_hub.usbhid.device_info import DeviceInfo, HIDReportDescriptor, HIDCollection, AxisSpec
+from arduino_hub.usbhid.hid_items import append_logical, append_report_count, append_usage, append_usage_page
 
 logger = logging.getLogger(__name__)
 
@@ -497,10 +498,7 @@ class ReportParser:
             # REPORT_SIZE (1)
             buf.extend((0x75, 0x01))
             # REPORT_COUNT (num_buttons)
-            if num_buttons <= 0xFF:
-                buf.extend((0x95, num_buttons))
-            else:
-                buf.extend((0x96, num_buttons & 0xFF, (num_buttons >> 8) & 0xFF))
+            append_report_count(buf, num_buttons)
             # INPUT (Data | Variable | Absolute)
             flags = 0x02  # Data | Variable | Absolute
             if not bc.is_variable:
@@ -525,29 +523,17 @@ class ReportParser:
         # ── Value axes ──
         for vc in value_caps:
             # USAGE_PAGE
-            if vc.usage_page <= 0xFF:
-                buf.extend((0x05, vc.usage_page & 0xFF))
-            else:
-                buf.extend((0x06, vc.usage_page & 0xFF, (vc.usage_page >> 8) & 0xFF))
-
+            append_usage_page(buf, vc.usage_page)
             # USAGE
-            if vc.usage <= 0xFF:
-                buf.extend((0x09, vc.usage & 0xFF))
-            else:
-                buf.extend((0x0A, vc.usage & 0xFF, (vc.usage >> 8) & 0xFF))
-
+            append_usage(buf, vc.usage)
             # LOGICAL_MINIMUM
-            _append_logical(buf, vc.logical_min)
+            append_logical(buf, vc.logical_min)
             # LOGICAL_MAXIMUM
-            _append_logical(buf, vc.logical_max)
-
+            append_logical(buf, vc.logical_max)
             # REPORT_SIZE
             buf.extend((0x75, vc.bit_size & 0xFF))
             # REPORT_COUNT
-            if vc.report_count <= 0xFF:
-                buf.extend((0x95, vc.report_count & 0xFF))
-            else:
-                buf.extend((0x96, vc.report_count & 0xFF, (vc.report_count >> 8) & 0xFF))
+            append_report_count(buf, vc.report_count)
 
             # INPUT flags
             flags = 0x02  # Data | Variable
@@ -578,7 +564,10 @@ class ReportParser:
         # Reconstruct raw HID Report Descriptor
         raw_report = self.reconstruct_report_descriptor(mouse_caps)
 
-        # Axis fields, in report order (already sorted by DataIndex)
+        # Axis fields, in report order (already sorted by DataIndex).
+        # wire_order starts equal to the descriptor ordinal; devices whose
+        # physical wire order differs (e.g. G305 X/Y quirk) override it in
+        # devices/<name>.json.
         axes = [
             AxisSpec(
                 usage_page=vc.usage_page,
@@ -588,6 +577,7 @@ class ReportParser:
                 logical_max=vc.logical_max,
                 relative=vc.is_relative,
                 data_index=vc.data_index,
+                wire_order=vc.data_index,
             )
             for vc in mouse_caps.get("value_caps", [])
         ]
@@ -646,29 +636,6 @@ class ReportParser:
 
         info.name = info.product_string or f"{info.vendor_id:04X}:{info.product_id:04X}"
         return info
-
-
-# ── Helper: logical min/max encoding ─────────────────────────────
-
-
-def _append_logical(buf: bytearray, value: int):
-    """Append LOGICAL_MINIMUM or LOGICAL_MAXIMUM item to buffer."""
-    if value < 0:
-        if -128 <= value <= 127:
-            buf.extend((0x15, value & 0xFF))
-        elif -32768 <= value <= 32767:
-            buf.extend((0x16, value & 0xFF, (value >> 8) & 0xFF))
-        else:
-            buf.extend((0x17, value & 0xFF, (value >> 8) & 0xFF,
-                        (value >> 16) & 0xFF, (value >> 24) & 0xFF))
-    else:
-        if value <= 0xFF:
-            buf.extend((0x25, value))
-        elif value <= 0xFFFF:
-            buf.extend((0x26, value & 0xFF, (value >> 8) & 0xFF))
-        else:
-            buf.extend((0x27, value & 0xFF, (value >> 8) & 0xFF,
-                        (value >> 16) & 0xFF, (value >> 24) & 0xFF))
 
 
 # ── CLI ──────────────────────────────────────────────────────────

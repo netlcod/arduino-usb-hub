@@ -1,0 +1,43 @@
+{
+  "name": "mouse",
+  "device_type": 1,
+  "protocol_version": 1,
+  "commands": [
+    {
+      "name": "MOVE",
+      "opcode": 1,
+      "args": [
+        {"name": "dx", "type": "i16"},
+        {"name": "dy", "type": "i16"}
+      ]
+    },
+    {
+      "name": "BUTTON_DOWN",
+      "opcode": 2,
+      "args": [
+        {"name": "button", "type": "u8"}
+      ]
+    },
+    {
+      "name": "BUTTON_UP",
+      "opcode": 3,
+      "args": [
+        {"name": "button", "type": "u8"}
+      ]
+    },
+    {
+      "name": "CLICK",
+      "opcode": 4,
+      "args": [
+        {"name": "button", "type": "u8"}
+      ]
+    },
+    {
+      "name": "WHEEL",
+      "opcode": 5,
+      "args": [
+        {"name": "delta", "type": "i8"}
+      ]
+    }
+  ]
+}

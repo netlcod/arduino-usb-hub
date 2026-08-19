@@ -1,0 +1,85 @@
+{
+  "name": "g305",
+  "vendor_id": "0x046D",
+  "product_id": "0xC53F",
+  "bcd_device": "0x4401",
+  "usb_version": "0x0200",
+  "device_class": "0x00",
+  "device_subclass": "0x00",
+  "device_protocol": "0x00",
+  "ep0_max_packet_size": 32,
+  "bm_attributes": "0xA0",
+  "max_power_ma": 98,
+  "hid_interface_class": "0x03",
+  "hid_subclass": "0x01",
+  "hid_protocol": "0x02",
+  "bcd_hid": "0x0111",
+  "country_code": "0x00",
+  "ep_max_packet_size": 32,
+  "ep_interval_ms": 1,
+  "hid_report_descriptors": [
+    {
+      "interface_number": 0,
+      "data_hex": "05010902a1010901a1008502050919012910150025017501951081020501093116018026ff7f7510950181060501093016018026ff7f751095018106050109381581257f750895018106050c0a38021581257f750895018106c0c0",
+      "collections": [
+        {
+          "usage_page": "0x01",
+          "usage": "0x02",
+          "report_id": 2,
+          "input_report_length": 9,
+          "output_report_length": 0,
+          "feature_report_length": 0
+        }
+      ]
+    }
+  ],
+  "report_id": 2,
+  "report_length": 9,
+  "button_count": 16,
+  "axes": [
+    {
+      "usage_page": "0x01",
+      "usage": "0x31",
+      "bits": 16,
+      "logical_min": -32767,
+      "logical_max": 32767,
+      "relative": true,
+      "data_index": 16,
+      "wire_order": 1
+    },
+    {
+      "usage_page": "0x01",
+      "usage": "0x30",
+      "bits": 16,
+      "logical_min": -32767,
+      "logical_max": 32767,
+      "relative": true,
+      "data_index": 17,
+      "wire_order": 0
+    },
+    {
+      "usage_page": "0x01",
+      "usage": "0x38",
+      "bits": 8,
+      "logical_min": -127,
+      "logical_max": 127,
+      "relative": true,
+      "data_index": 18,
+      "wire_order": 2
+    },
+    {
+      "usage_page": "0x0C",
+      "usage": "0x0238",
+      "bits": 8,
+      "logical_min": -127,
+      "logical_max": 127,
+      "relative": true,
+      "data_index": 19,
+      "wire_order": 3
+    }
+  ],
+  "manufacturer_string": "Logitech",
+  "product_string": "USB Receiver",
+  "serial_number": "",
+  "lang_id": "0x0409"
+}

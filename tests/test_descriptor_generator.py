@@ -11,9 +11,9 @@ in devices/g305.json).
 
 from pathlib import Path
 
-from arduino_hub.devices import load as load_device
 from arduino_hub.targets import load_target
 from arduino_hub.usbhid.hid_generator import generate_report_descriptor
+from util import load_g305
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -67,7 +67,7 @@ def test_generic_16btn_matches_91_byte_reference():
     assert len(descriptor) == 91
     assert descriptor[:12] == bytes.fromhex("05010902a1010901a1008502")
 
-    device = load_device("g305", REPO_ROOT)
+    device = load_g305()
     assert descriptor == device.hid_report_descriptors[0].data
 
 

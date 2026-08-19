@@ -37,5 +37,13 @@
       "logical_max": 127,
       "relative": true
     }
-  ]
+  ],
+  "command": {
+    "enabled": true,
+    "transport": "feature",
+    "queue_slots": 4
+  },
+  "capability": {
+    "enabled": false
+  }
 }

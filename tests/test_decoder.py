@@ -7,9 +7,9 @@ used to decode raw G305 reports, mirroring the generated decode_input().
 import re
 from pathlib import Path
 
-from arduino_hub.devices import load as load_device
 from arduino_hub.targets import load_target
 from arduino_hub.usbhid.hid_generator import generate_hid_mapper_h
+from util import load_g305
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "g305_reports.bin"
@@ -57,7 +57,7 @@ def _decode_report(header: str, report: bytes) -> dict[str, int]:
 
 
 def test_generated_constants_match_g305_layout():
-    source = load_device("g305", REPO_ROOT)
+    source = load_g305()
     target = load_target("generic_3btn", REPO_ROOT)
     header = generate_hid_mapper_h(source, target)
     c = _constants(header)
@@ -85,7 +85,7 @@ def test_generated_constants_match_g305_layout():
 
 def test_decode_spec_report():
     # decode(02 05 00 10 00 20 00 01 00) == {buttons:5, x:16, y:32, wheel:1}
-    source = load_device("g305", REPO_ROOT)
+    source = load_g305()
     target = load_target("generic_3btn", REPO_ROOT)
     header = generate_hid_mapper_h(source, target)
 
@@ -98,7 +98,7 @@ def test_decode_spec_report():
 
 
 def test_decode_fixture():
-    source = load_device("g305", REPO_ROOT)
+    source = load_g305()
     target = load_target("generic_3btn", REPO_ROOT)
     header = generate_hid_mapper_h(source, target)
 

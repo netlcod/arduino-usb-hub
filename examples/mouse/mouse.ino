@@ -1,10 +1,12 @@
 #include <Mouse.h>
 #include <usbhub.h>
 #include "hidmouserptparser.h"
+#include <MouseCommandHandler.h>
 
 USB Usb;
 HIDBoot<USB_HID_PROTOCOL_MOUSE> HidMouse(&Usb, true); // report protocol
 MouseRptParser Prs;
+MouseCommandHandler Cmd;
 
 void onButtonUp(uint16_t id) {
   Mouse.release(id);
@@ -38,4 +40,5 @@ void setup() {
 
 void loop() {
   Usb.Task();
+  Cmd.poll();
 }

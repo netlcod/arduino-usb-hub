@@ -23,6 +23,12 @@ import logging
 from dataclasses import dataclass, field
 
 from arduino_hub.usbhid.device_info import AxisSpec, DeviceInfo, TargetProfile
+from arduino_hub.usbhid.hid_items import (
+    append_logical,
+    append_report_count,
+    append_usage,
+    append_usage_page,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,58 +81,27 @@ def compute_report_layout(
     report_length: int,
     buttons: int,
     axes: list[AxisSpec],
+    order_key=None,
 ) -> ReportLayout:
-    """Compute bit offsets of every report field in physical order."""
+    """Compute bit offsets of every report field in physical order.
+
+    `order_key` is the sort key for the physical (wire) field order:
+    pass `lambda a: a.wire_order` for source profiles (where the wire
+    order can differ from the descriptor order, e.g. the G305 X/Y
+    quirk), or `None` to keep the given list order (target profiles:
+    the JSON list order is the single source of truth).
+    """
     offset = ((buttons + 7) // 8) * 8
+    if order_key is not None:
+        axes = sorted(axes, key=order_key)
     fields = []
-    for axis in sorted(axes, key=lambda a: a.data_index):
+    for axis in axes:
         fields.append(ReportField(USAGE_FIELD.get(axis.usage), offset, axis.bits))
         offset += axis.bits
     return ReportLayout(report_id, report_length, buttons, fields)
 
 
 # ── Report descriptor generation ────────────────────────────────
-
-
-def _append_usage_page(buf: bytearray, page: int) -> None:
-    if page <= 0xFF:
-        buf.extend((0x05, page & 0xFF))
-    else:
-        buf.extend((0x06, page & 0xFF, (page >> 8) & 0xFF))
-
-
-def _append_usage(buf: bytearray, usage: int) -> None:
-    if usage <= 0xFF:
-        buf.extend((0x09, usage & 0xFF))
-    else:
-        buf.extend((0x0A, usage & 0xFF, (usage >> 8) & 0xFF))
-
-
-def _append_logical(buf: bytearray, value: int) -> None:
-    """LOGICAL_MINIMUM / LOGICAL_MAXIMUM item (signed form)."""
-    if value < 0:
-        if -128 <= value <= 127:
-            buf.extend((0x15, value & 0xFF))
-        elif -32768 <= value <= 32767:
-            buf.extend((0x16, value & 0xFF, (value >> 8) & 0xFF))
-        else:
-            buf.extend((0x17, value & 0xFF, (value >> 8) & 0xFF,
-                        (value >> 16) & 0xFF, (value >> 24) & 0xFF))
-    else:
-        if value <= 0xFF:
-            buf.extend((0x25, value))
-        elif value <= 0xFFFF:
-            buf.extend((0x26, value & 0xFF, (value >> 8) & 0xFF))
-        else:
-            buf.extend((0x27, value & 0xFF, (value >> 8) & 0xFF,
-                        (value >> 16) & 0xFF, (value >> 24) & 0xFF))
-
-
-def _append_report_count(buf: bytearray, count: int) -> None:
-    if count <= 0xFF:
-        buf.extend((0x95, count))
-    else:
-        buf.extend((0x96, count & 0xFF, (count >> 8) & 0xFF))
 
 
 def generate_report_descriptor(target: TargetProfile) -> bytes:
@@ -150,11 +125,11 @@ def generate_report_descriptor(target: TargetProfile) -> bytes:
         buf.extend((0x15, 0x00))                     # LOGICAL_MINIMUM (0)
         buf.extend((0x25, 0x01))                     # LOGICAL_MAXIMUM (1)
         if target.layout == _LAYOUT_ARDUINO:
-            _append_report_count(buf, buttons)       # REPORT_COUNT first
-            buf.extend((0x75, 0x01))                 # REPORT_SIZE (1)
+            append_report_count(buf, buttons)            # REPORT_COUNT first
+            buf.extend((0x75, 0x01))                     # REPORT_SIZE (1)
         else:
             buf.extend((0x75, 0x01))
-            _append_report_count(buf, buttons)
+            append_report_count(buf, buttons)
         buf.extend((0x81, 0x02))                     # INPUT (Data,Var,Abs)
 
         padding = (8 - buttons % 8) % 8
@@ -178,21 +153,21 @@ def generate_report_descriptor(target: TargetProfile) -> bytes:
                    and axes[j].logical_max == a.logical_max
                    and axes[j].relative == a.relative):
                 j += 1
-            _append_usage_page(buf, a.usage_page)
+            append_usage_page(buf, a.usage_page)
             for g in axes[i:j]:
-                _append_usage(buf, g.usage)
-            _append_logical(buf, a.logical_min)
-            _append_logical(buf, a.logical_max)
+                append_usage(buf, g.usage)
+            append_logical(buf, a.logical_min)
+            append_logical(buf, a.logical_max)
             buf.extend((0x75, a.bits & 0xFF))
-            _append_report_count(buf, j - i)
+            append_report_count(buf, j - i)
             buf.extend((0x81, 0x06 if a.relative else 0x02))
             i = j
     else:
         for a in target.axes:
-            _append_usage_page(buf, a.usage_page)
-            _append_usage(buf, a.usage)
-            _append_logical(buf, a.logical_min)
-            _append_logical(buf, a.logical_max)
+            append_usage_page(buf, a.usage_page)
+            append_usage(buf, a.usage)
+            append_logical(buf, a.logical_min)
+            append_logical(buf, a.logical_max)
             buf.extend((0x75, a.bits & 0xFF))
             buf.extend((0x95, 0x01))
             buf.extend((0x81, 0x06 if a.relative else 0x02))
@@ -276,14 +251,66 @@ def _mapper_constants(prefix: str, layout: ReportLayout) -> list[str]:
     return lines
 
 
+def _validate_source_wire_order(source: DeviceInfo) -> None:
+    """Raise on duplicate/missing wire order in a source profile."""
+    orders = [a.wire_order for a in source.axes]
+    if len(orders) != len(set(orders)):
+        raise ValueError(
+            f"Source '{source.name}' has duplicate wire_order values: "
+            f"{sorted(orders)}"
+        )
+
+
+def source_layout_warnings(source: DeviceInfo) -> list[str]:
+    """Warnings about source profile layout consistency.
+
+    The key one: when the wire order differs from the descriptor order
+    (some devices, e.g. the G305 receiver, send X before Y although
+    the descriptor lists Y first), the override must be explicit and
+    visible — it is otherwise silently lost on re-clone.
+    """
+    warnings: list[str] = []
+    if not source.axes:
+        return warnings
+
+    wire = [a.usage for a in sorted(source.axes, key=lambda a: a.wire_order)]
+    desc = [a.usage for a in sorted(source.axes, key=lambda a: a.data_index)]
+    if wire != desc:
+        warnings.append(
+            f"wire order ({[hex(u) for u in wire]}) differs from descriptor "
+            f"order ({[hex(u) for u in desc]}) — explicit wire_order override "
+            "in effect"
+        )
+
+    payload = compute_report_layout(
+        source.report_id, source.report_length, source.button_count, source.axes,
+        order_key=lambda a: a.wire_order,
+    ).payload_len
+    if source.report_length != payload + 1:
+        warnings.append(
+            f"report_length {source.report_length} != payload {payload} + report id"
+        )
+    return warnings
+
+
 def generate_hid_mapper_h(source: DeviceInfo, target: TargetProfile) -> str:
     """C++ header translating source reports into target reports."""
+    _validate_source_wire_order(source)
     src = compute_report_layout(
-        source.report_id, source.report_length, source.button_count, source.axes
+        source.report_id, source.report_length, source.button_count, source.axes,
+        order_key=lambda a: a.wire_order,
     )
     tgt = compute_report_layout(
         target.report_id, target.report_length, target.buttons, target.axes
     )
+
+    warnings = source_layout_warnings(source)
+    if warnings:
+        logger.warning(
+            "Source '%s' layout warnings: %s",
+            source.name,
+            "; ".join(warnings),
+        )
 
     lines = [
         "#ifndef HID_MAPPER_H",

@@ -2,7 +2,7 @@
 arduino-cli-data/
 arduino-cli.exe
 arduino-cli_*_Windows_64bit.zip
-devices/
+/devices/
 .build/
 
 # Byte-compiled / optimized / DLL files
@@ -165,3 +165,6 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Generated PC client headers (written by arduino-hub patch)
+pc_client/generated/

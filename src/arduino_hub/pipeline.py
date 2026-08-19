@@ -6,12 +6,18 @@ from arduino_hub.cli.manager import ArduinoCLIManager
 from arduino_hub.core.installer import ArduinoCoreInstaller
 from arduino_hub.core.patcher import (
     MOUSE_LIB_RELATIVE,
-    USBPatcher,
+    CommandChannelPatcher,
+    IdentityPatcher,
+    LibraryPatcher,
     write_patch_manifest,
 )
 from arduino_hub.devices import load as load_device, save as save_device
+from arduino_hub.exceptions import PatchError
 from arduino_hub.targets import load_target
+from arduino_hub.usbhid.command_generator import CMD_PAYLOAD_LEN
+from arduino_hub.usbhid.command_schema import load_command_schema
 from arduino_hub.usbhid.descriptor_reader import parse_report
+from arduino_hub.usbhid.hid_generator import source_layout_warnings
 
 logger = logging.getLogger(__name__)
 
@@ -79,30 +85,64 @@ def _patch_for_device(
 ) -> None:
     device = load_device(device_name, base_dir)
     target = load_target(target_name, base_dir)
+    schema = load_command_schema(base_dir)
 
-    USBPatcher.patch_usb_core(core_path)
-    USBPatcher.patch_boards_txt(core_path, device)
-    USBPatcher.patch_usbcore(core_path, device)
-    USBPatcher.patch_hid(core_path, device)
+    IdentityPatcher.patch_usb_core(core_path)
+    IdentityPatcher.patch_boards_txt(core_path, device)
+    IdentityPatcher.patch_usbcore(core_path, device)
+    IdentityPatcher.patch_hid(core_path, device)
+
+    CommandChannelPatcher.write_hid_command_config(core_path, target, schema)
+    CommandChannelPatcher.write_hid_capability_blob(core_path, target, schema)
+    CommandChannelPatcher.patch_hid_command_core(core_path)
+
+    if target.command.enabled:
+        hid_cpp = core_path / "libraries" / "HID" / "src" / "HID.cpp"
+        if not hid_cpp.exists() or "readReportPacket" not in hid_cpp.read_text(
+            encoding="utf-8"
+        ):
+            raise PatchError(
+                f"Command channel patch did not apply: HID library not found "
+                f"at {hid_cpp}. Fix the core install before flashing, "
+                f"otherwise the device flashes without a command channel."
+            )
 
     lib_path = base_dir / MOUSE_LIB_RELATIVE
-    USBPatcher.patch_mouse_library(lib_path, device, target)
+    LibraryPatcher.patch_mouse_library(lib_path, device, target)
 
-    write_patch_manifest(
-        base_dir,
-        device_name,
-        target_name,
-        {
-            "boards.txt": f"VID/PID {device.vendor_id:04X}:{device.product_id:04X}, "
-                          f"strings, CDC_DISABLED, USB_EP_SIZE=16, "
-                          f"USB_CONFIG_POWER={device.max_power_ma}",
-            "USBCore.cpp": f"bcdDevice 0x{device.bcd_device:X}, iSerialNumber 0",
-            "HID.h": f"bcdHID 0x{device.bcd_hid:X}",
-            "HID.cpp": "subclass 1 / protocol 2 (boot mouse policy)",
-            "Mouse.cpp": "includes + move() decode->encode->SendReport",
-            "Mouse.h": "move(int16_t x, int16_t y, int16_t wheel, int16_t pan), uint16_t buttons",
-        },
-    )
+    LibraryPatcher.install_hub_command_library(base_dir, schema)
+    LibraryPatcher.write_pc_client_headers(base_dir, target, schema)
+
+    command_desc = ""
+    if target.command.enabled:
+        command_desc = (
+            f"transport={target.command.transport}, "
+            f"slots={target.command.queue_slots}, "
+            f"payload={CMD_PAYLOAD_LEN}"
+        )
+    else:
+        command_desc = "disabled"
+
+    patches = {
+        "boards.txt": f"VID/PID {device.vendor_id:04X}:{device.product_id:04X}, "
+                      f"strings, CDC_DISABLED, USB_EP_SIZE=16, "
+                      f"USB_CONFIG_POWER={device.max_power_ma}",
+        "USBCore.cpp": f"bcdDevice 0x{device.bcd_device:X}, iSerialNumber 0",
+        "HID.h": f"bcdHID 0x{device.bcd_hid:X}",
+        "HID.cpp": "subclass 1 / protocol 2 (boot mouse policy)",
+        "Mouse.cpp": "includes + move() decode->encode->SendReport",
+        "Mouse.h": "move(int16_t x, int16_t y, int16_t wheel, int16_t pan), uint16_t buttons",
+        "hid_command_config.h": command_desc,
+        "hid_capability_blob.h": "generated capability payload (HID_CAPABILITY_BLOB)",
+        "HID.cpp/HID.h command": "SET_REPORT(Output|Feature) ring buffer, GET_REPORT(Feature)",
+        "HubCommand": "MouseCommandHandler + transports",
+        "pc_client/generated": "mouse_commands.h + command_channel.h",
+    }
+    warnings = source_layout_warnings(device)
+    if warnings:
+        patches["source layout"] = "; ".join(warnings)
+
+    write_patch_manifest(base_dir, device_name, target_name, patches)
 
 
 def cmd_patch(
