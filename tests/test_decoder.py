@@ -62,10 +62,13 @@ def test_generated_constants_match_g305_layout():
     header = generate_hid_mapper_h(source, target)
     c = _constants(header)
 
-    # NOTE: the receiver sends X before Y in the report data, even though the
-    # USB Tree Viewer report lists Y (DataIndex 16) before X (17). Verified
-    # empirically: moving right produced cursor-down until the data_index
-    # values for X/Y were swapped in profiles/sources/g305.json.
+    # NOTE: the descriptor — and Windows' own HID caps in the USB Tree
+    # Viewer dump — list Y (DataIndex 16) before X (17), and the real
+    # receiver works correctly plugged straight into a PC. Behind the USB
+    # Host Shield, however, it emits X first (verified empirically:
+    # moving right produced cursor-down until calibrated). The profile
+    # keeps data_index as reported and swaps wire_order in
+    # profiles/sources/g305.json.
     assert c["SRC_REPORT_ID"] == 2
     assert c["SRC_REPORT_LEN"] == 9
     assert c["SRC_PAYLOAD_LEN"] == 8

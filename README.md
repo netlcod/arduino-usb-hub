@@ -144,12 +144,17 @@ The saved JSON file contains:
 }
 ```
 
-If the source device sends its X/Y axis data in a different order than the
-report suggests (known for some Logitech receivers), set the `wire_order`
-values of the X (`0x30`) and Y (`0x31`) entries in `profiles/sources/<name>.json`
-accordingly (X first = `wire_order` 0 for X, 1 for Y). Re-running `clone`
-restores the reported order, so repeat the fix after re-cloning; the patch
-run reports the override as a `source layout` warning in `.build/patches.json`.
+Some Logitech receivers emit their X/Y axis fields behind a USB Host
+Shield in a different order than their own report descriptor declares
+(the G305 receiver does: its descriptor — and Windows' own `InputCaps` —
+list Y first, yet shield-side data carries X first; plugged straight
+into a PC the same device behaves correctly). If cursor directions are
+swapped after flashing, set the `wire_order` values of the X (`0x30`)
+and Y (`0x31`) entries in `profiles/sources/<name>.json` to the observed
+physical order (G305: X=`16`, Y=`17`; `data_index` stays as reported).
+Re-running `clone` restores the reported order, so repeat the fix after
+re-cloning; the patch run reports the override as a `source layout`
+warning in `.build/patches.json`.
 
 ### `patch`
 
@@ -413,7 +418,7 @@ The bootloader will create a temporary COM port during those few seconds.
 | `Device 'X' not found` | Run `arduino-hub clone --name X` first |
 | Upload fails with `can't open device` | Wrong COM port, or Leonardo is not in bootloader mode |
 | Sketch compiles but upload fails on first attempt | The bootloader may need ~2 seconds after reset. Try running `flash` again |
-| Cursor moves right when moving the mouse down (axes swapped) | Source device sends X before Y in report data. Set the `wire_order` values for X/Y in `profiles/sources/<name>.json` (X before Y) and re-run `patch`/`flash` |
+| Cursor moves right when moving the mouse down (axes swapped) | Shield-side report data differs from the descriptor order (G305 quirk: descriptor/Windows list Y first, receiver sends X first behind the shield). Set the `wire_order` values for X/Y in `profiles/sources/<name>.json` to the physical order and re-run `patch`/`flash` |
 | Right button does nothing, and the cursor freezes while it is held | Report ID byte was stripped twice (button byte `0x02` equals the report ID). Regenerate with a current `hid_mapper.h` — `decode_input()` detects the ID byte by report length |
 | Side buttons do nothing in Windows | The 3-button target masks them out. Re-patch with `--target generic_5btn` (or `generic_16btn` for the full profile) and re-flash |
 | `client_demo`: "command channel not found" | The firmware has no command channel (re-patch a target with `command.enabled: true` and re-flash), or the wrong VID/PID was passed |

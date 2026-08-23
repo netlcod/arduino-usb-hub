@@ -27,9 +27,10 @@ class AxisSpec:
     For source profiles (profiles/sources/*.json) `data_index` is the
     descriptor ordinal as reported by USB Tree Viewer, while
     `wire_order` is the physical field sequence in the report data.
-    Some devices (e.g. G305 receiver) send X before Y although the
-    descriptor lists Y first; `wire_order` is the explicit, validated
-    override for that quirk.
+    The G305 receiver declares Y before X in its descriptor (and works
+    that way plugged straight into a PC), but behind a USB Host Shield
+    it emits X first; `wire_order` is the explicit, validated override
+    for that host-dependent divergence.
     """
     usage: int = 0x30
     bits: int = 8
