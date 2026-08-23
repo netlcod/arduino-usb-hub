@@ -30,8 +30,9 @@ add_library(hubclient INTERFACE)
 target_include_directories(hubclient INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/target
-  ${hidapi_SOURCE_DIR}
 )
+# hidapi include path comes from the hidapi::hidapi target (a directory
+# containing a flat hidapi.h), so headers use #include <hidapi.h>.
 target_link_libraries(hubclient INTERFACE hidapi::hidapi)
 
 add_executable(client_demo examples/client_demo.cpp)

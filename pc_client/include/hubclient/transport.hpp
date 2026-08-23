@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <cstring>
 
-#include "hidapi/hidapi.h"
+#include <hidapi.h>
 
 #include "command_channel.h"
 

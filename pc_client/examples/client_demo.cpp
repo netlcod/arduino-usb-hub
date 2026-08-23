@@ -16,7 +16,7 @@
 #include <string>
 #include <thread>
 
-#include "hidapi/hidapi.h"
+#include <hidapi.h>
 #include "hubclient/mouse_client.hpp"
 
 using namespace std::chrono_literals;
@@ -50,13 +50,9 @@ int main(int argc, char** argv) {
     std::printf("%-6s %-6s %-9s %-6s %s\n", "VID", "PID", "UsagePage",
                 "Usage", "Path");
     for (hid_device_info* it = info; it; it = it->next) {
-#ifdef _WIN32
-      std::printf("0x%04X 0x%04X 0x%04X   0x%04X  %ls\n", it->vendor_id,
-                  it->product_id, it->usage_page, it->usage, it->path);
-#else
+      // hidapi >= 0.13: path is UTF-8 char* on all platforms.
       std::printf("0x%04X 0x%04X 0x%04X   0x%04X  %s\n", it->vendor_id,
                   it->product_id, it->usage_page, it->usage, it->path);
-#endif
     }
     hid_free_enumeration(info);
     return 0;

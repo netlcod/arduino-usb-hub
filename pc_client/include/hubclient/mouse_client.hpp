@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <memory>
 
-#include "hidapi/hidapi.h"
+#include <hidapi.h>
 
 #include "capability.hpp"
 #include "command_channel.h"
