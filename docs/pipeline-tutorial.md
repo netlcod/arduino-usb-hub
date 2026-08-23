@@ -15,15 +15,15 @@ AVR Core 1.8.6 (низкоуровневые детали); `docs/plans/` — п
 USB-мыши:
 
 1. **clone** — разбирает отчёт USB Device Tree Viewer реального устройства и
-   сохраняет его дескрипторы в `devices/<name>.json`.
+   сохраняет его дескрипторы в `profiles/sources/<name>.json`.
 2. **patch** — патчит установленный AVR core 1.8.6 и библиотеки в
    `arduino-cli-data/`, чтобы прошивка представляла себя как клонируемое
    устройство (VID/PID/строки/дескрипторы) и выдавала целевой HID-репорт.
    Плюс встраивает командный канал PC → Arduino (feature/output/interrupt_out).
 3. **compile / flash** — компилирует sketch и заливает.
 
-Вся конфигурация — это JSON-профили: `devices/` (что клонируем),
-`targets/` (что отдаём), `commands/` (протокол командного канала).
+Вся конфигурация — это JSON-профили: `profiles/sources/` (что клонируем),
+`profiles/targets/` (что отдаём), `profiles/protocol/` (протокол командного канала).
 
 ## 2. Установка и окружение
 
@@ -39,13 +39,13 @@ pip install -e .
 
 | Путь | Что это |
 |------|---------|
-| `arduino-cli.exe` | Arduino CLI (автозагрузка, только Windows) |
+| `.build/tools/arduino-cli.exe` | Arduino CLI (автозагрузка, только Windows) |
 | `arduino-cli-data/` | Данные CLI: `packages/arduino/hardware/avr/<ver>/` (ядро), `user/libraries/` (патченные библиотеки) |
-| `devices/<name>.json` | Клонированные профили устройств |
-| `targets/<name>.json` | Целевые профили вывода |
-| `commands/<name>.json` | Схема командного протокола |
+| `profiles/sources/<name>.json` | Клонированные профили устройств |
+| `profiles/targets/<name>.json` | Целевые профили вывода |
+| `profiles/protocol/<name>.json` | Схема командного протокола |
 | `.build/patches.json` | Манифест последнего `patch` |
-| `pc_client/generated/` | Заголовки для клиента (пишутся `patch`, gitignored) |
+| `pc_client/target/` | Заголовки для клиента (пишутся `patch`, gitignored) |
 | `examples/mouse/` | Референсный sketch: `Usb.Task()` + `Cmd.poll()` в loop() |
 
 ## 3. Быстрый старт
@@ -55,7 +55,7 @@ pip install -e .
 arduino-hub setup
 
 # 2. Клонировать устройство из отчёта USB Device Tree Viewer
-arduino-hub clone --name g305 --report devices/reports/g305.txt
+arduino-hub clone --name g305 --report profiles/sources/reports/g305.txt
 
 # 3. Патчить ядро под устройство и целевой профиль
 arduino-hub patch --device g305 --target generic_5btn
@@ -104,13 +104,13 @@ arduino-hub flash --device g305 --target generic_5btn \
 - реконструирует из дескриптора репорт: report_id, длину, число кнопок,
   оси (usage page/usage/разрядность/логические мин-макс/relative),
   data_index (смещение поля в физическом репорте);
-- сохраняет всё в `devices/<name>.json`.
+- сохраняет всё в `profiles/sources/<name>.json`.
 
 Клонирование служит **источником** для `hid_mapper.h` (декодер исходного
 репорта) и для `boards.txt`/`USBCore.cpp`/`HID.h` (дескрипторы устройства).
 
 **Quirks**:
-- G305 шлёт X раньше Y, хотя в репорте Y указан первым — в `devices/g305.json`
+- G305 шлёт X раньше Y, хотя в репорте Y указан первым — в `profiles/sources/g305.json`
   `data_index` у осей переставлен вручную (X=16, Y=17). Повторный `clone`
   вернёт порядок отчёта — перестановку нужно восстанавливать вручную.
 - Репорт может быть многоотчётным (Report ID ≠ 1). Код на устройстве
@@ -123,8 +123,8 @@ arduino-hub flash --device g305 --target generic_5btn \
 
 `pipeline.py: _patch_for_device` — сердце пайплайна. Порядок операций:
 
-1. Загрузка профилей: `devices/<name>.json`, `targets/<target>.json`,
-   `commands/mouse.json` (схема нужна всегда — из неё генерируются
+1. Загрузка профилей: `profiles/sources/<name>.json`, `profiles/targets/<target>.json`,
+   `profiles/protocol/mouse.json` (схема нужна всегда — из неё генерируются
    `mouse_commands.h` и поля capability).
 2. `IdentityPatcher.patch_usb_core()` — отключение CDC в `USBCore.cpp`:
    комментарируется `CDC_GetInterface(&interfaces);` и ветка
@@ -166,7 +166,7 @@ arduino-hub flash --device g305 --target generic_5btn \
 9. `LibraryPatcher.install_hub_command_library()` — копирует
    `libraries/HubCommand/` (статические исходники в репо) в
    `user/libraries/HubCommand/` и генерирует туда `mouse_commands.h`.
-10. `LibraryPatcher.write_pc_client_headers()` — пишет `pc_client/generated/`
+10. `LibraryPatcher.write_pc_client_headers()` — пишет `pc_client/target/`
     (`mouse_commands.h` + `command_channel.h`) — нужны до сборки клиента.
 11. `write_patch_manifest()` — `.build/patches.json`:
     `{device, target, patched_at, patches: {файл: описание}, generated: {sha256}}`.
@@ -198,9 +198,9 @@ arduino-hub flash --device g305 --target generic_5btn \
 
 ## 5. Конфигурационные файлы
 
-### 5.1 `devices/<name>.json`
+### 5.1 `profiles/sources/<name>.json`
 
-Профиль клонированного устройства (см. `devices/g305.json`):
+Профиль клонированного устройства (см. `profiles/sources/g305.json`):
 
 | Поле | Назначение |
 |------|------------|
@@ -213,7 +213,7 @@ arduino-hub flash --device g305 --target generic_5btn \
 | `axes[]` | Оси источника: usage, bits, logical min/max, relative, `data_index` (смещение в физическом репорте) |
 | `hid_report_descriptors[]` | Raw-дескрипторы (справочно для аудита) |
 
-### 5.2 `targets/<name>.json`
+### 5.2 `profiles/targets/<name>.json`
 
 Профиль **вывода** — какой репорт Leonardo отдаёт (см. `generic_3btn.json`,
 `generic_5btn.json`, `generic_16btn.json`):
@@ -233,11 +233,11 @@ arduino-hub flash --device g305 --target generic_5btn \
 `generic_16btn` — полный клон (16 кнопок, 16-бит X/Y, Wheel, AC Pan, ReportID 2,
 команды через feature).
 
-**После правки `targets/*.json` или `commands/mouse.json` обязательно
+**После правки `profiles/targets/*.json` или `profiles/protocol/mouse.json` обязательно
 перепатчить** (`arduino-hub patch`) — сгенерированные заголовки устройства и
-`pc_client/generated/*` должны приходить из одного прогона с прошивкой.
+`pc_client/target/*` должны приходить из одного прогона с прошивкой.
 
-### 5.3 `commands/mouse.json`
+### 5.3 `profiles/protocol/mouse.json`
 
 Source of truth протокола канала:
 
@@ -386,7 +386,7 @@ cmake --build pc_client/build --config Release
 ### `Mouse/src/hid_profile.h`
 
 Таргетный HID Report Descriptor (`HID_DESCRIPTOR`, `HID_REPORT_ID`,
-`HID_REPORT_LENGTH`) — mouse-коллекция из `targets/<t>.json` + vendor-
+`HID_REPORT_LENGTH`) — mouse-коллекция из `profiles/targets/<t>.json` + vendor-
 коллекция канала (при `command.enabled`). Mouse-коллекция байт-в-байт
 совпадает со сборками без канала.
 
@@ -395,14 +395,14 @@ cmake --build pc_client/build --config Release
 `decode_input(src, dst)` — исходный репорт (9 байт G305) → внутреннее
 `MouseState` (по `data_index`); `encode_output(state, dst)` — внутреннее
 состояние → таргетный репорт (16 кнопок, X/Y 16-бит, wheel, pan).
-`SRC_*`/`TGT_*` константы — из `devices/` и `targets/`.
+`SRC_*`/`TGT_*` константы — из `profiles/sources/` и `profiles/targets/`.
 
 ### `HubCommand/`
 
 - `CommandTransport` (feature/output/interrupt_out/None) поверх
   `HID().readReportPacket`/`readOutReport`;
 - `DeviceCommandHandler`, `MouseCommandHandler` (опкоды → Mouse API);
-- `mouse_commands.h` — генерируется из `commands/mouse.json`.
+- `mouse_commands.h` — генерируется из `profiles/protocol/mouse.json`.
 
 ### `Mouse.cpp` / `Mouse.h`
 
@@ -430,8 +430,8 @@ Cmd.poll();   // обработка командного канала из loop(
 | Команда | Опции | Действие |
 |---------|-------|----------|
 | `setup` | `--cli-version`, `--core-version` | Скачать CLI, установить AVR core и библиотеки |
-| `clone` | `--name`, `--report` | Парсинг отчёта → `devices/<name>.json` |
-| `patch` | `--device`, `--target` (default `generic_3btn`) | Полный набор правок ядра + генерация заголовков + манифест |
+| `clone` | `--name`, `--report` | Парсинг отчёта → `profiles/sources/<name>.json` |
+| `patch` | `--device`, `--target` (default `generic_3btn`), `--client-out <dir>` | Полный набор правок ядра + генерация заголовков + манифест; `--client-out` экспортирует заголовки PC-клиента во внешний каталог |
 | `compile` | `--sketch`, `--fqbn` (default `arduino:avr:leonardo`) | Компиляция sketch'а |
 | `flash` | `--device`, `--target`, `--sketch`, `--port`, `--fqbn` | Патч + компиляция + загрузка |
 
@@ -453,7 +453,7 @@ Cmd.poll();   // обработка командного канала из loop(
 | X/Y перепутаны после `clone` G305 | `data_index` переставляется вручную (см. 4.2) |
 | `HidD_SetFeature: ERROR_GEN_FAILURE` при bring-up | Windows шлёт data stage длиной 16 с продублированным id-байтом; разбор формата см. 6.2 |
 | `transport=output` не работает на Linux | Ожидаемо: hid_write без interrupt OUT endpoint не работает. Используйте `feature` |
-| Плавает поведение канала | Проверьте, что `feature`-клиент и прошивка собраны из одного `patch` (и `pc_client/generated` перегенерирован) |
+| Плавает поведение канала | Проверьте, что `feature`-клиент и прошивка собраны из одного `patch` (и `pc_client/target` перегенерирован) |
 | Смена `--target` ничего не изменила в Mouse.cpp | Это нормально: регенерируются только `hid_profile.h`/`hid_mapper.h`; правки Mouse.cpp/h маркер-охраняемые |
 
 ---
@@ -466,8 +466,8 @@ src/arduino_hub/
   pipeline.py        — cmd_setup/clone/patch/compile/flash, _patch_for_device
   exceptions.py      — иерархия ArduinoHubError (PatchError, CommandSchemaError, ...)
   logging_config.py  — логирование (-v)
-  devices.py         — load/save devices/<name>.json
-  targets.py         — load targets/<name>.json
+  devices.py         — load/save profiles/sources/<name>.json
+  targets.py         — load profiles/targets/<name>.json
   cli/
     downloader.py    — ArduinoCLIDownloader (скачивание + распаковка arduino-cli.exe)
     executor.py      — ArduinoCLIExecutor (тонкая обёртка subprocess)

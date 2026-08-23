@@ -6,7 +6,7 @@ lines 26-57).
 
 Test 2: generic_16btn target must reproduce the 91-byte Logitech descriptor that
 reconstruct_report_descriptor() produces for the G305 (and that is stored
-in devices/g305.json).
+in profiles/sources/g305.json).
 """
 
 from pathlib import Path

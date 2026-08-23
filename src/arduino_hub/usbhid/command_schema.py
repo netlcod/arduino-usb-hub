@@ -1,12 +1,12 @@
 """Device command protocol schema.
 
-The JSON schema in `commands/<device>.json` is the build-time source of
-truth for the PC → Arduino command protocol: opcodes, argument types,
-order and payload size. It is parsed at patch time (never at runtime on
-the AVR) and used to generate shared definitions for the device firmware
-and for the PC client.
+The JSON schema in `profiles/protocol/<device>.json` is the build-time
+source of truth for the PC → Arduino command protocol: opcodes, argument
+types, order and payload size. It is parsed at patch time (never at
+runtime on the AVR) and used to generate shared definitions for the
+device firmware and for the PC client.
 
-Example (commands/mouse.json):
+Example (profiles/protocol/mouse.json):
 
     {
       "name": "mouse",
@@ -44,7 +44,8 @@ _TYPE_SIZES = {
     "i16": 2,
 }
 
-COMMANDS_DIR_NAME = "commands"
+PROFILES_DIR_NAME = "profiles"
+COMMANDS_DIR_NAME = "protocol"
 DEFAULT_COMMAND_SCHEMA = "mouse"
 
 
@@ -142,11 +143,11 @@ def from_dict(data: dict) -> CommandSchema:
 
 
 def _commands_dir(base_dir: Path) -> Path:
-    return base_dir / COMMANDS_DIR_NAME
+    return base_dir / PROFILES_DIR_NAME / COMMANDS_DIR_NAME
 
 
 def load_command_schema(base_dir: Path, name: str = DEFAULT_COMMAND_SCHEMA) -> CommandSchema:
-    """Load a command protocol schema from commands/<name>.json."""
+    """Load a command protocol schema from profiles/protocol/<name>.json."""
     path = _commands_dir(base_dir) / f"{name}.json"
     if not path.exists():
         raise CommandSchemaError(

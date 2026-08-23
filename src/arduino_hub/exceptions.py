@@ -36,11 +36,11 @@ class PatchError(ArduinoHubError):
 
 
 class DeviceNotFoundError(ArduinoHubError):
-    """Device info not found in devices/ directory."""
+    """Device info not found in profiles/sources/ directory."""
 
 
 class TargetNotFoundError(ArduinoHubError):
-    """Target profile not found in targets/ directory."""
+    """Target profile not found in profiles/targets/ directory."""
 
 
 class InvalidTargetError(ArduinoHubError):

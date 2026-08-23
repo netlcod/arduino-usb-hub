@@ -17,26 +17,27 @@ include/hubclient/
   mouse_client.hpp   MouseClient — высокоуровневый API: open / move / wheel / click / ...
 examples/
   client_demo.cpp    smoke-тест: --list, квадрат, скролл, клик
-generated/           СГЕНЕРИРОВАНЫ, не редактировать (см. ниже)
-  mouse_commands.h   опкоды + wire-format (_OFF/_SIZE/_LEN макросы) из commands/mouse.json
+target/              СГЕНЕРИРОВАНЫ под прошитый target, не редактировать (см. ниже)
+  mouse_commands.h   опкоды + wire-format (_OFF/_SIZE/_LEN макросы) из profiles/protocol/mouse.json
   command_channel.h  wiring конкретного target: transport, report id, queue slots
 ```
 
-## Откуда берутся generated/*.h (важно)
+## Откуда берутся target/*.h (важно)
 
 Заголовки генерирует **не этот проект**, а `arduino-hub patch` из репозитория
 arduino-usb-hub — тот же прогон, что патчит прошивку:
 
 1. В arduino-usb-hub: `arduino-hub patch --device <n> --target <t>` (+ flash).
-2. Скопировать `arduino-usb-hub/pc_client/generated/{mouse_commands.h,command_channel.h}`
-   сюда, в `generated/`.
+2. Скопировать `arduino-usb-hub/pc_client/target/{mouse_commands.h,command_channel.h}`
+   сюда, в `target/` — либо сразу указать
+   `arduino-hub patch --client-out <путь к этому проекту>/pc_client/target`.
 3. Собрать и использовать.
 
 **Правило рассинхронизации**: прошивка и клиент должны происходить из одного
-patch-рана. Если изменились `targets/<t>.json` или `commands/mouse.json` →
+patch-рана. Если изменились `profiles/targets/<t>.json` или `profiles/protocol/mouse.json` →
 re-patch → re-flash → заново скопировать заголовки → rebuild клиента.
 `command_channel.h` зависит от target (например, `HID_COMMAND_TRANSPORT`),
-`mouse_commands.h` — только от протокола (`commands/mouse.json`).
+`mouse_commands.h` — только от протокола (`profiles/protocol/mouse.json`).
 
 ## Сборка (Windows, CMake >= 3.16)
 
@@ -78,14 +79,14 @@ if (mouse.open(vid, pid)) {      // ищет vendor collection (usage page 0xFF0
 
 Эти инварианты нельзя нарушать при доработках:
 
-- **Оффсеты и опкоды — только через макросы** из `generated/mouse_commands.h`
+- **Оффсеты и опкоды — только через макросы** из `target/mouse_commands.h`
   (`MOUSE_CMD_*`, `MOUSE_CMD_*_OFF/_SIZE/_LEN`). Никогда не хардкодить байтовые
   оффсеты пакетов.
 - **Фиксированные константы канала** (живут в command_generator.py
   arduino-usb-hub, НЕ конфигурируются): command report id 3, payload 15,
   hidapi buffer 16 (`[report id][payload]`), capability report id 4,
   capability payload 8.
-- **Transport выбирается на этапе patch** (`targets/<t>.json` →
+- **Transport выбирается на этапе patch** (`profiles/targets/<t>.json` →
   `command_channel.h`):
   - `feature` — SET_REPORT, кроссплатформенно;
   - `output` — **только Windows**: `hid_write` на Linux это raw `write()` по

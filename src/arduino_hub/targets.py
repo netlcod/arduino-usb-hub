@@ -1,8 +1,8 @@
 """Target profiles: output HID report layouts for the Leonardo.
 
-Target profiles live in targets/<name>.json and describe the report
-the Leonardo will present to the PC (unlike source profiles in
-devices/<name>.json, which describe what the receiver sends).
+Target profiles live in profiles/targets/<name>.json and describe the
+report the Leonardo will present to the PC (unlike source profiles in
+profiles/sources/<name>.json, which describe what the receiver sends).
 """
 
 import json
@@ -21,6 +21,7 @@ from arduino_hub.usbhid.hid_generator import compute_report_layout
 logger = logging.getLogger(__name__)
 
 TARGETS_DIR_NAME = "targets"
+PROFILES_DIR_NAME = "profiles"
 
 DEVICE_KINDS = ("mouse", "keyboard", "gamepad")
 MAX_BUTTONS = 16  # MouseState buttons are uint16_t
@@ -71,7 +72,7 @@ def validate_target(profile: TargetProfile) -> None:
 
 
 def _targets_dir(base_dir: Path) -> Path:
-    return base_dir / TARGETS_DIR_NAME
+    return base_dir / PROFILES_DIR_NAME / TARGETS_DIR_NAME
 
 
 def _fmt_hex(value: int) -> str:
@@ -147,7 +148,7 @@ def _from_dict(data: dict) -> TargetProfile:
 
 
 def load_target(name: str, base_dir: Path) -> TargetProfile:
-    """Load a target profile from targets/<name>.json."""
+    """Load a target profile from profiles/targets/<name>.json."""
     path = _targets_dir(base_dir) / f"{name}.json"
     if not path.exists():
         raise TargetNotFoundError(

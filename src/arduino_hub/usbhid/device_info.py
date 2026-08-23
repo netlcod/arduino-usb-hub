@@ -24,7 +24,7 @@ class HIDReportDescriptor:
 class AxisSpec:
     """A single HID value field (axis) in a report.
 
-    For source profiles (devices/*.json) `data_index` is the
+    For source profiles (profiles/sources/*.json) `data_index` is the
     descriptor ordinal as reported by USB Tree Viewer, while
     `wire_order` is the physical field sequence in the report data.
     Some devices (e.g. G305 receiver) send X before Y although the

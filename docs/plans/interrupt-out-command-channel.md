@@ -62,5 +62,5 @@ src/arduino_hub/usbhid/command_generator.py
 src/arduino_hub/core/patcher.py
 libraries/HubCommand/src/CommandTransport.h
 pc_client/include/hubclient/mouse_client.hpp
-targets/*.json
+profiles/targets/*.json
 tests/test_command_generator.py, tests/test_patcher.py

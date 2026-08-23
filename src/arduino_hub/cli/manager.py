@@ -15,6 +15,7 @@ class ArduinoCLIManager:
     ):
         self._base_dir = base_dir
         self._cli_version = cli_version
+        self._tools_dir = base_dir / ".build" / "tools"
         self._config_file = base_dir / "arduino-cli.yaml"
 
     @property
@@ -23,6 +24,6 @@ class ArduinoCLIManager:
 
     def ensure_cli(self) -> ArduinoCLIExecutor:
         binary = ArduinoCLIDownloader.ensure_binary(
-            self._base_dir, self._cli_version
+            self._tools_dir, self._cli_version
         )
         return ArduinoCLIExecutor(binary, self._config_file)

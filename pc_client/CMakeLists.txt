@@ -1,8 +1,9 @@
 # PC client for the arduino-hub command channel (C++ / hidapi).
 #
-# Generated headers live in generated/ and are (re)written by
+# Target headers live in target/ and are (re)written by
 # `arduino-hub patch` — run it once before building so that
-# generated/mouse_commands.h and generated/command_channel.h exist.
+# target/mouse_commands.h and target/command_channel.h exist.
+# Use `arduino-hub patch --client-out <dir>` to export them elsewhere.
 #
 # Build (Windows, CMake >= 3.16):
 #   cmake -B build
@@ -28,7 +29,7 @@ FetchContent_MakeAvailable(hidapi)
 add_library(hubclient INTERFACE)
 target_include_directories(hubclient INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/generated
+  ${CMAKE_CURRENT_SOURCE_DIR}/target
   ${hidapi_SOURCE_DIR}
 )
 target_link_libraries(hubclient INTERFACE hidapi::hidapi)

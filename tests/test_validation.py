@@ -33,8 +33,8 @@ def test_target_wrong_report_length_rejected(tmp_path):
             {"usage": "0x38", "bits": 8},
         ],
     }
-    targets = tmp_path / "targets"
-    targets.mkdir()
+    targets = tmp_path / "profiles" / "targets"
+    targets.mkdir(parents=True)
     (targets / "bad.json").write_text(
         __import__("json").dumps(bad), encoding="utf-8"
     )
@@ -55,8 +55,8 @@ def test_target_bad_buttons_rejected(tmp_path):
             {"usage": "0x38", "bits": 8},
         ],
     }
-    targets = tmp_path / "targets"
-    targets.mkdir()
+    targets = tmp_path / "profiles" / "targets"
+    targets.mkdir(parents=True)
     (targets / "bad.json").write_text(
         __import__("json").dumps(bad), encoding="utf-8"
     )
@@ -78,8 +78,8 @@ def test_target_unknown_device_kind_rejected(tmp_path):
             {"usage": "0x38", "bits": 8},
         ],
     }
-    targets = tmp_path / "targets"
-    targets.mkdir()
+    targets = tmp_path / "profiles" / "targets"
+    targets.mkdir(parents=True)
     (targets / "bad.json").write_text(
         __import__("json").dumps(bad), encoding="utf-8"
     )
@@ -121,8 +121,8 @@ def test_wire_order_backward_compat(tmp_path):
             {"usage": "0x0238", "bits": 8, "data_index": 19},
         ],
     }
-    devices = tmp_path / "devices"
-    devices.mkdir()
+    devices = tmp_path / "profiles" / "sources"
+    devices.mkdir(parents=True)
     (devices / "old.json").write_text(
         __import__("json").dumps(source), encoding="utf-8"
     )

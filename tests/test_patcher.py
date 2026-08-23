@@ -566,7 +566,7 @@ def test_install_hub_command_library_and_pc_headers(tmp_path):
     assert "MOUSE_CMD_MOVE = 0x01" in commands
 
     LibraryPatcher.write_pc_client_headers(base, target, schema)
-    gen = base / "pc_client" / "generated"
+    gen = base / "pc_client" / "target"
     assert (gen / "mouse_commands.h").exists()
     assert (gen / "command_channel.h").exists()
     channel = (gen / "command_channel.h").read_text(encoding="utf-8")

@@ -125,10 +125,10 @@ Optional flags:
 ### `clone`
 
 Lists all connected HID devices, lets you pick one interactively, opens it to
-read descriptors, and saves everything to `devices/<name>.json`.
+read descriptors, and saves everything to `profiles/sources/<name>.json`.
 
 ```bash
-arduino-hub clone --name mydevice --report devices/reports/usb-report.txt
+arduino-hub clone --name mydevice --report profiles/sources/reports/usb-report.txt
 ```
 
 The saved JSON file contains:
@@ -146,7 +146,7 @@ The saved JSON file contains:
 
 If the source device sends its X/Y axis data in a different order than the
 report suggests (known for some Logitech receivers), set the `wire_order`
-values of the X (`0x30`) and Y (`0x31`) entries in `devices/<name>.json`
+values of the X (`0x30`) and Y (`0x31`) entries in `profiles/sources/<name>.json`
 accordingly (X first = `wire_order` 0 for X, 1 for Y). Re-running `clone`
 restores the reported order, so repeat the fix after re-cloning; the patch
 run reports the override as a `source layout` warning in `.build/patches.json`.
@@ -163,13 +163,16 @@ Applies all patches to the installed AVR core (idempotent):
   endpoint, `GET_REPORT` capability).
 - **Generated files** — `hid_profile.h`/`hid_mapper.h` (Mouse library),
   `hid_command_config.h` (core), `mouse_commands.h` (HubCommand library and
-  `pc_client/generated/`), HubCommand library install, `.build/patches.json`.
+  `pc_client/target/`), HubCommand library install, `.build/patches.json`.
 
 ```bash
 arduino-hub patch --device mydevice --target generic_3btn
+# optionally export the PC client headers to an external project:
+arduino-hub patch --device mydevice --target generic_3btn \
+    --client-out ../my-project/pc_client/target
 ```
 
-`--target` selects the output profile from `targets/` (default `generic_3btn`):
+`--target` selects the output profile from `profiles/targets/` (default `generic_3btn`):
 
 | Target | Presents to the PC | Command channel |
 |--------|--------------------|-----------------|
@@ -210,7 +213,7 @@ arduino-hub flash --device mydevice --sketch examples/mouse/mouse.ino --port COM
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--device` | *(required)* | Device name from `clone` |
-| `--target` | `generic_3btn` | Target profile name from `targets/` |
+| `--target` | `generic_3btn` | Target profile name from `profiles/targets/` |
 | `--sketch` | *(required)* | Path to `.ino` file |
 | `--port` | *(required)* | COM port (e.g. `COM6`) |
 | `--fqbn` | `arduino:avr:leonardo` | Fully Qualified Board Name |
@@ -328,14 +331,14 @@ byte of the interrupt OUT packet (`[0x03][payload 15]` = 16 bytes), and
 `readOutReport()` drops it after reading.
 
 Every command is one packet: `[opcode u8][typed args]`. The opcodes and
-payload layout are defined in `commands/mouse.json` (build-time source of
+payload layout are defined in `profiles/protocol/mouse.json` (build-time source of
 truth) and generated into `mouse_commands.h` for both the firmware and the PC
 client — they are validated against the 15-byte payload at patch time.
 
 ### Configuration
 
 Everything is configured in the target profile, e.g.
-`targets/generic_5btn.json`:
+`profiles/targets/generic_5btn.json`:
 
 ```json
 "command": {
@@ -355,8 +358,8 @@ Everything is configured in the target profile, e.g.
 | `command.queue_slots` | `4`–`8` | firmware ring buffer depth (drop-new when full) |
 | `capability.enabled` | `true` / `false` | optional meta-level capability report (report ID 4, readable via `hid_get_feature_report`) |
 
-After editing a target or `commands/mouse.json`, re-run `arduino-hub patch`
-(it regenerates the firmware descriptor **and** `pc_client/generated/*`),
+After editing a target or `profiles/protocol/mouse.json`, re-run `arduino-hub patch`
+(it regenerates the firmware descriptor **and** `pc_client/target/*`),
 re-flash, and rebuild the PC client — both sides must come from the same
 patch run.
 
@@ -410,7 +413,7 @@ The bootloader will create a temporary COM port during those few seconds.
 | `Device 'X' not found` | Run `arduino-hub clone --name X` first |
 | Upload fails with `can't open device` | Wrong COM port, or Leonardo is not in bootloader mode |
 | Sketch compiles but upload fails on first attempt | The bootloader may need ~2 seconds after reset. Try running `flash` again |
-| Cursor moves right when moving the mouse down (axes swapped) | Source device sends X before Y in report data. Set the `wire_order` values for X/Y in `devices/<name>.json` (X before Y) and re-run `patch`/`flash` |
+| Cursor moves right when moving the mouse down (axes swapped) | Source device sends X before Y in report data. Set the `wire_order` values for X/Y in `profiles/sources/<name>.json` (X before Y) and re-run `patch`/`flash` |
 | Right button does nothing, and the cursor freezes while it is held | Report ID byte was stripped twice (button byte `0x02` equals the report ID). Regenerate with a current `hid_mapper.h` — `decode_input()` detects the ID byte by report length |
 | Side buttons do nothing in Windows | The 3-button target masks them out. Re-patch with `--target generic_5btn` (or `generic_16btn` for the full profile) and re-flash |
 | `client_demo`: "command channel not found" | The firmware has no command channel (re-patch a target with `command.enabled: true` and re-flash), or the wrong VID/PID was passed |
@@ -429,24 +432,25 @@ arduino-usb-hub/
 │       ├── pipeline.py        # subcommand implementations
 │       ├── exceptions.py      # custom exceptions
 │       ├── logging_config.py
-│       ├── devices.py         # load/save devices/<name>.json
-│       ├── targets.py         # load/save targets/<name>.json (incl. command channel)
+│       ├── devices.py         # load/save profiles/sources/<name>.json
+│       ├── targets.py         # load/save profiles/targets/<name>.json (incl. command channel)
 │       ├── usbhid/            # HID enumeration (renamed to avoid collision with hidapi)
 │       │   ├── hid_items.py           # shared low-level HID descriptor item emitters
 │       │   ├── hid_generator.py       # target report descriptor + hid_profile/mapper
-│       │   ├── command_schema.py      # commands/<name>.json schema (opcodes/payload)
+│       │   ├── command_schema.py      # profiles/protocol/<name>.json schema (opcodes/payload)
 │       │   └── command_generator.py   # command descriptor block, config + blob/opcode headers
 │       ├── cli/               # Arduino CLI downloader, executor, manager
 │       └── core/              # Core installer, Identity/CommandChannel/Library patchers
 ├── examples/
 │   └── mouse/                 # Reference Arduino sketch (host replay + Cmd.poll())
-├── targets/                   # Output profiles (report layout + command channel wiring)
-├── commands/                  # Command protocol schemas (mouse.json, future keyboard/gamepad)
+├── profiles/
+│   ├── sources/               # Cloned device descriptors (gitignored)
+│   ├── targets/               # Output profiles (report layout + command channel wiring)
+│   └── protocol/              # Command protocol schemas (mouse.json, future keyboard/gamepad)
 ├── libraries/
 │   └── HubCommand/            # Device command channel library (copied to user libraries by patch)
-├── pc_client/                 # C++ PC client (hidapi) + generated headers (gitignored)
+├── pc_client/                 # C++ PC client (hidapi) + target headers written by patch (gitignored)
 ├── arduino-cli-data/          # Downloaded cores & libraries (gitignored)
-├── devices/                   # Cloned device descriptors (gitignored)
 └── docs/
     ├── usb-stack-audit.md        # USB stack compatibility analysis
     └── plans/                    # design notes (hid-clone-architecture,

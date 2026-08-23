@@ -3,7 +3,7 @@
 ## Архитектура
 
 ```
-devices/
+profiles/sources/
   g305.json              # Source Profile (что шлёт ресивер)
        |
        v
@@ -48,10 +48,10 @@ bool decode_report(const uint8_t* src, uint8_t len, HidInputReport& out);
 
 ### Q2. Разделение source/target
 ```
-devices/g305.json              # Source Profile — отчёт USB Tree Viewer
-targets/generic_3btn.json      # Target: Arduino Mouse (3 btn, X/Y/Wheel 8-bit)
-targets/generic_5btn.json      # Target: 5 btn (XButton1/2), 8-bit X/Y/Wheel
-targets/generic_16btn.json     # Target: полный клон (16 btn, 16-bit X/Y, AC Pan)
+profiles/sources/g305.json              # Source Profile — отчёт USB Tree Viewer
+profiles/targets/generic_3btn.json      # Target: Arduino Mouse (3 btn, X/Y/Wheel 8-bit)
+profiles/targets/generic_5btn.json      # Target: 5 btn (XButton1/2), 8-bit X/Y/Wheel
+profiles/targets/generic_16btn.json     # Target: полный клон (16 btn, 16-bit X/Y, AC Pan)
 ```
 - `arduino-hub patch --device g305 --target generic_3btn` → translate 9-byte → 3-button mouse
 - `arduino-hub patch --device g305 --target generic_5btn` → + боковые (Назад/Вперёд)
@@ -104,4 +104,4 @@ G305 9-byte report → decode → 3-button mouse (16→3 buttons, 16-bit→8-bit
 Mouse-библиотека расширена: `_buttons` → `uint16_t` (патч идемпотентный, маркеры).
 
 **Этап 2b — Side buttons:**
-`targets/generic_5btn.json` (копия 3btn, buttons=5) → боковые кнопки как XButton1/XButton2 без смены формата репорта.
+`profiles/targets/generic_5btn.json` (копия 3btn, buttons=5) → боковые кнопки как XButton1/XButton2 без смены формата репорта.

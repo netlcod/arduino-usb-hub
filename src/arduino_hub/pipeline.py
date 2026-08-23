@@ -1,11 +1,13 @@
 import logging
 import re
+import shutil
 from pathlib import Path
 
 from arduino_hub.cli.manager import ArduinoCLIManager
 from arduino_hub.core.installer import ArduinoCoreInstaller
 from arduino_hub.core.patcher import (
     MOUSE_LIB_RELATIVE,
+    PC_CLIENT_TARGET_DIR,
     CommandChannelPatcher,
     IdentityPatcher,
     LibraryPatcher,
@@ -77,11 +79,27 @@ def cmd_clone(base_dir: Path, name: str, report: Path) -> None:
     )
 
 
+def _export_client_headers(base_dir: Path, out_dir: Path) -> None:
+    """Copy the generated PC client headers to an external directory."""
+    src_dir = base_dir / PC_CLIENT_TARGET_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("mouse_commands.h", "command_channel.h"):
+        src = src_dir / name
+        if not src.exists():
+            raise PatchError(
+                f"Cannot export client headers: {src} not found. "
+                f"Run 'arduino-hub patch' first."
+            )
+        shutil.copy2(src, out_dir / name)
+    logger.info("PC client headers exported: %s", out_dir)
+
+
 def _patch_for_device(
     base_dir: Path,
     device_name: str,
     target_name: str,
     core_path: Path,
+    client_out: Path | None = None,
 ) -> None:
     device = load_device(device_name, base_dir)
     target = load_target(target_name, base_dir)
@@ -136,8 +154,11 @@ def _patch_for_device(
         "hid_capability_blob.h": "generated capability payload (HID_CAPABILITY_BLOB)",
         "HID.cpp/HID.h command": "SET_REPORT(Output|Feature) ring buffer, GET_REPORT(Feature)",
         "HubCommand": "MouseCommandHandler + transports",
-        "pc_client/generated": "mouse_commands.h + command_channel.h",
+        "pc_client/target": "mouse_commands.h + command_channel.h",
     }
+    if client_out is not None:
+        _export_client_headers(base_dir, client_out)
+        patches["client export"] = str(client_out)
     warnings = source_layout_warnings(device)
     if warnings:
         patches["source layout"] = "; ".join(warnings)
@@ -151,6 +172,7 @@ def cmd_patch(
     target_name: str,
     cli_version: str,
     core_version: str,
+    client_out: Path | None = None,
 ) -> None:
     logger.info("=== Step: Patch for device '%s', target '%s' ===", device_name, target_name)
 
@@ -160,7 +182,7 @@ def cmd_patch(
     installer = ArduinoCoreInstaller(executor, base_dir)
     core_path = installer.ensure_version(core_version)
 
-    _patch_for_device(base_dir, device_name, target_name, core_path)
+    _patch_for_device(base_dir, device_name, target_name, core_path, client_out)
 
     logger.info("Patch complete for '%s' (target '%s').", device_name, target_name)
 

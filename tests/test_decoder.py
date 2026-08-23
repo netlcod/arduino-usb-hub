@@ -65,7 +65,7 @@ def test_generated_constants_match_g305_layout():
     # NOTE: the receiver sends X before Y in the report data, even though the
     # USB Tree Viewer report lists Y (DataIndex 16) before X (17). Verified
     # empirically: moving right produced cursor-down until the data_index
-    # values for X/Y were swapped in devices/g305.json.
+    # values for X/Y were swapped in profiles/sources/g305.json.
     assert c["SRC_REPORT_ID"] == 2
     assert c["SRC_REPORT_LEN"] == 9
     assert c["SRC_PAYLOAD_LEN"] == 8

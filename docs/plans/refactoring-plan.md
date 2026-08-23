@@ -67,12 +67,12 @@ build-time generation, layering command channel). Rewrite не нужен.
 
 Проблема: `test_patcher.py`, `test_descriptor_generator.py`,
 `test_encode.py`, `test_decoder.py` читают `load_device("g305", REPO_ROOT)`
-из gitignored `devices/g305.json`. Свежий клон → тесты падают.
+из gitignored `profiles/sources/g305.json`. Свежий клон → тесты падают.
 
 Изменение: закоммитить `tests/fixtures/g305_device.json`; тесты читают
 фикстуру (функция загрузки source-профиля для тестов).
 
-Проверка: `pytest` зелёный в свежем клоне без `devices/`.
+Проверка: `pytest` зелёный в свежем клоне без `profiles/sources/`.
 
 ### R11 — валидация TargetProfile
 
@@ -172,7 +172,7 @@ build-time generation, layering command channel). Rewrite не нужен.
 остаётся идентичным по содержимому.
 
 Проверка: `test_command_generator.py`; сравнение сгенерированного
-`mouse_commands.h` до/после (device + pc_client/generated).
+`mouse_commands.h` до/после (device + pc_client/target).
 
 ### device_kind в TargetProfile
 
@@ -185,7 +185,7 @@ build-time generation, layering command channel). Rewrite не нужен.
 Параметризация header дескриптора (usage 0x02 vs 0x06 vs 0x05) — при
 появлении первого реального second use case.
 
-Проверка: `pytest`; round-trip target JSON (devices/targets serialization).
+Проверка: `pytest`; round-trip target JSON (profiles/sources/targets serialization).
 
 ---
 
@@ -217,7 +217,7 @@ pc_client, mouse_commands).
 физического wire-порядка. У G305 эти порядки расходятся
 (дескриптор: Y-first; железо: X-first), фикс — ручной swap `data_index`,
 невидимый и теряемый на re-clone. Три источника (дескриптор-байты,
-`axes[].data_index`, `USAGE_FIELD`) уже разошлись в `devices/g305.json`
+`axes[].data_index`, `USAGE_FIELD`) уже разошлись в `profiles/sources/g305.json`
 и держатся вместе только «по совпадению» (target-список и source-swap
 симметрично гасят друг друга).
 

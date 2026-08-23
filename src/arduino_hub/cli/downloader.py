@@ -25,6 +25,7 @@ class ArduinoCLIDownloader:
 
     @staticmethod
     def ensure_binary(base_dir: Path, version: str) -> Path:
+        base_dir.mkdir(parents=True, exist_ok=True)
         binary = base_dir / ArduinoCLIDownloader._binary_name()
         if binary.exists():
             logger.info("Arduino CLI binary found: %s", binary)

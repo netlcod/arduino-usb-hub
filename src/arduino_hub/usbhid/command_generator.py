@@ -249,7 +249,7 @@ def generate_commands_h(schema: CommandSchema) -> str:
         "#ifndef %sH" % prefix,
         "#define %sH" % prefix,
         "",
-        f"// Generated from commands/{schema.name}.json by arduino-hub — do not edit.",
+        f"// Generated from profiles/protocol/{schema.name}.json by arduino-hub — do not edit.",
         f"#define {prefix}DEVICE_TYPE {schema.device_type}",
         f"#define {prefix}PROTOCOL_VERSION {schema.protocol_version}",
         "",

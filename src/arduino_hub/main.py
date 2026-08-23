@@ -64,6 +64,13 @@ def main() -> None:
         default="generic_3btn",
         help="Target profile name (default: generic_3btn)",
     )
+    p_patch.add_argument(
+        "--client-out",
+        type=Path,
+        default=None,
+        help="Optional directory to export the generated PC client headers "
+        "(mouse_commands.h, command_channel.h), e.g. another repository",
+    )
     _add_global_opts(p_patch)
 
     p_compile = sub.add_parser("compile", help="Compile sketch")
@@ -111,7 +118,14 @@ def main() -> None:
         elif args.command == "clone":
             cmd_clone(base_dir, args.name, args.report)
         elif args.command == "patch":
-            cmd_patch(base_dir, args.device, args.target, args.cli_version, args.core_version)
+            cmd_patch(
+                base_dir,
+                args.device,
+                args.target,
+                args.cli_version,
+                args.core_version,
+                client_out=args.client_out,
+            )
         elif args.command == "compile":
             cmd_compile(
                 base_dir,

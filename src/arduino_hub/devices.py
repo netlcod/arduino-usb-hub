@@ -8,7 +8,8 @@ from arduino_hub.usbhid.device_info import DeviceInfo, HIDReportDescriptor, HIDC
 
 logger = logging.getLogger(__name__)
 
-DEVICES_DIR_NAME = "devices"
+PROFILES_DIR_NAME = "profiles"
+SOURCES_DIR_NAME = "sources"
 
 
 def _sanitize_filename(name: str) -> str:
@@ -18,7 +19,7 @@ def _sanitize_filename(name: str) -> str:
 
 
 def _devices_dir(base_dir: Path) -> Path:
-    return base_dir / DEVICES_DIR_NAME
+    return base_dir / PROFILES_DIR_NAME / SOURCES_DIR_NAME
 
 
 def _fmt_hex(value: int) -> str:

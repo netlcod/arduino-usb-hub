@@ -12,7 +12,7 @@ Reads a full report .txt file and extracts:
 - Reconstructs the raw HID Report Descriptor from Caps
 
 Usage:
-    python -m arduino_hub.usbhid.descriptor_reader devices/reports/logitech-g305-report.txt
+    python -m arduino_hub.usbhid.descriptor_reader profiles/sources/reports/logitech-g305-report.txt
 """
 
 from __future__ import annotations
@@ -567,7 +567,7 @@ class ReportParser:
         # Axis fields, in report order (already sorted by DataIndex).
         # wire_order starts equal to the descriptor ordinal; devices whose
         # physical wire order differs (e.g. G305 X/Y quirk) override it in
-        # devices/<name>.json.
+        # profiles/sources/<name>.json.
         axes = [
             AxisSpec(
                 usage_page=vc.usage_page,
@@ -721,6 +721,6 @@ if __name__ == "__main__":
     if len(sys.argv) >= 2:
         report_path = sys.argv[1]
     else:
-        report_path = "devices/reports/logitech-g305-report.txt"
+        report_path = "profiles/sources/reports/logitech-g305-report.txt"
 
     read_and_print(report_path)

@@ -2,7 +2,7 @@
 arduino-cli-data/
 arduino-cli.exe
 arduino-cli_*_Windows_64bit.zip
-/devices/
+/profiles/sources/
 .build/
 
 # Byte-compiled / optimized / DLL files
@@ -167,4 +167,4 @@ cython_debug/
 #.idea/
 
 # Generated PC client headers (written by arduino-hub patch)
-pc_client/generated/
+pc_client/target/

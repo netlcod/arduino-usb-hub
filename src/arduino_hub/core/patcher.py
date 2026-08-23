@@ -39,7 +39,7 @@ HID_POLICY_PROTOCOL = "HID_PROTOCOL_MOUSE"
 MOUSE_LIB_RELATIVE = Path("arduino-cli-data") / "user" / "libraries" / "Mouse" / "src"
 HUB_COMMAND_RELATIVE = Path("arduino-cli-data") / "user" / "libraries" / "HubCommand"
 HUB_COMMAND_SOURCE_DIR = Path("libraries") / "HubCommand"
-PC_CLIENT_GENERATED_DIR = Path("pc_client") / "generated"
+PC_CLIENT_TARGET_DIR = Path("pc_client") / "target"
 
 _HID_COMMAND_CONFIG_NAME = "hid_command_config.h"
 _HID_CAPABILITY_BLOB_NAME = "hid_capability_blob.h"
@@ -386,7 +386,7 @@ class LibraryPatcher:
         schema: CommandSchema,
     ) -> None:
         """Generate the shared headers for the PC C++ client."""
-        gen_dir = base_dir / PC_CLIENT_GENERATED_DIR
+        gen_dir = base_dir / PC_CLIENT_TARGET_DIR
         gen_dir.mkdir(parents=True, exist_ok=True)
         (gen_dir / commands_header_name(schema)).write_text(
             generate_commands_h(schema), encoding="utf-8"

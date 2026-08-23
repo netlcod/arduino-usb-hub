@@ -1,6 +1,6 @@
 # Анализ параметров Logitech G305 LIGHTSPEED Receiver для клонирования
 
-Источник: `devices/reports/logitech-g305-report.txt` — дамп из USB Device Tree Viewer.
+Источник: `profiles/sources/reports/logitech-g305-report.txt` — дамп из USB Device Tree Viewer.
 
 ## I. Фактические параметры G305 ресивера
 

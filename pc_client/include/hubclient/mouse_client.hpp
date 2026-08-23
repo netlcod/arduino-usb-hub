@@ -2,9 +2,9 @@
 //
 // Opens the vendor-defined HID collection (usage page 0xFF00) of the
 // target device and sends binary mouse commands. Opcode/payload layout
-// comes from generated/mouse_commands.h (generated from
-// commands/mouse.json by arduino-hub), channel wiring defaults from
-// generated/command_channel.h; when the firmware has the capability
+// comes from target/mouse_commands.h (generated from
+// profiles/protocol/mouse.json by arduino-hub), channel wiring defaults from
+// target/command_channel.h; when the firmware has the capability
 // report enabled, the values read at runtime override the defaults.
 
 #pragma once

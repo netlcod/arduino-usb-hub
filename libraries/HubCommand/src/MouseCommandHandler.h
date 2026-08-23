@@ -1,7 +1,7 @@
 // MouseCommandHandler — device-specific command layer.
 //
 // Translates command packets (opcode + typed payload, layout generated
-// from commands/mouse.json into mouse_commands.h) into the patched
+// from profiles/protocol/mouse.json into mouse_commands.h) into the patched
 // Mouse API. It does NOT know target-specific HID encoding: Mouse API
 // calls go through the usual encode_output() path inside Mouse.cpp.
 //
