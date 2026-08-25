@@ -1,15 +1,19 @@
+import difflib
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from arduino_hub.exceptions import PatchError
+from arduino_hub.core.validation import ValidationIssue, summarize
 from arduino_hub.usbhid.command_generator import (
     CMD_PAYLOAD_LEN,
     commands_header_name,
-    generate_capability_blob,
     generate_command_descriptor,
     generate_commands_h,
     generate_hid_capability_blob_h,
@@ -30,6 +34,10 @@ CDC_COMMENT_MARKER = "// CDC_GetInterface(&interfaces);"
 CDC_DISABLED_FLAG = "-DCDC_DISABLED"
 USB_EP_SIZE_FLAG = "-DUSB_EP_SIZE=16"
 USB_CONFIG_POWER_FLAG = "-DUSB_CONFIG_POWER={max_power_ma}"
+USB_VERSION_FLAG = "-DUSB_VERSION=0x{usb_version:04X}"
+USB_CONFIG_ATTRIBUTES_FLAG = "-DUSB_CONFIG_ATTRIBUTES=0x{bm_attributes:02X}"
+HID_EP_INTERVAL_FLAG = "-DHID_EP_INTERVAL=0x{ep_interval_ms:02X}"
+USB_EP0_MAX_PACKET_FLAG = "-DUSB_EP0_MAX_PACKET={ep0_max_packet_size}"
 
 # HID interface policy: boot mouse (subclass 1 / protocol 2), applied
 # to HID.cpp — deliberately not taken from the device JSON.
@@ -48,14 +56,98 @@ _HID_CAPABILITY_BLOB_NAME = "hid_capability_blob.h"
 # lets a patched core distinguish "already at current version" from
 # "patched by an older patcher", so content upgrades (e.g. the atomic
 # ring read) are re-applied instead of silently skipped.
+#
+# v3: identity parity additions — HID_EP_INTERVAL macro in D_ENDPOINT,
+# spec-correct GET_IDLE/GET_PROTOCOL answers (USB_SendControl instead
+# of TODO stubs).
 HID_H_PATCH_VERSION = 2
-HID_CPP_PATCH_VERSION = 2
+HID_CPP_PATCH_VERSION = 3
+USBCORE_H_MARKER = "#ifndef USB_CONFIG_ATTRIBUTES"
+USBCORE_H_VERSION_MARKER = "// HUB_PATCH_VERSION 1"
 _PATCH_VERSION_RE = re.compile(r"// HUB_PATCH_VERSION (\d+)")
+
+_D_DEVICE_RE = re.compile(
+    r"(D_DEVICE\(0x[0-9A-Fa-f]{2},0x[0-9A-Fa-f]{2},0x[0-9A-Fa-f]{2},)"
+    r"\d+"
+    r"(,USB_VID,USB_PID,)0x[0-9A-Fa-f]+"
+    r"(,IMANUFACTURER,IPRODUCT,)(?:ISERIAL|0)"
+    r"(,1\))"
+)
+_D_HIDREPORT_RE = re.compile(
+    r"(D_HIDREPORT\(length\) \{ 9, 0x21, )"
+    r"0x[0-9A-Fa-f]{2}"
+    r"(, )"
+    r"0x[0-9A-Fa-f]{2}"
+    r"(, )"
+    r"(?:0x[0-9A-Fa-f]{2}|\d+)"
+    r"(, 1, 0x22)"
+)
 
 
 def _get_patch_version(content: str) -> int:
     m = _PATCH_VERSION_RE.search(content)
     return int(m.group(1)) if m else 0
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write via a sibling temp file + os.replace.
+
+    A crash mid-write can never leave a truncated core/library file
+    behind (the AVR core is restored only by a full re-setup).
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+@dataclass
+class FileEdit:
+    """A single computed file change (not yet written)."""
+
+    path: Path
+    description: str
+    original: str
+    updated: str
+
+    @property
+    def changed(self) -> bool:
+        return self.original != self.updated
+
+
+def _read_or_empty(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def apply_edits(edits: list[FileEdit]) -> int:
+    """Persist changed edits atomically. Returns number of files written."""
+    written = 0
+    for edit in edits:
+        if not edit.changed:
+            continue
+        edit.path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(edit.path, edit.updated)
+        logger.info("Patched %s (%s)", edit.path, edit.description)
+        written += 1
+    unchanged = len(edits) - written
+    logger.info("Patch summary: %d file(s) changed, %d already up to date", written, unchanged)
+    return written
+
+
+def render_edits_diff(edits: list[FileEdit]) -> str:
+    """Unified diffs for all changed edits (dry-run output)."""
+    chunks = []
+    for edit in edits:
+        if not edit.changed:
+            continue
+        diff = difflib.unified_diff(
+            edit.original.splitlines(keepends=True),
+            edit.updated.splitlines(keepends=True),
+            fromfile=f"{edit.path} (current)",
+            tofile=f"{edit.path} (after patch)",
+        )
+        chunks.append(f"# {edit.description}\n" + "".join(diff))
+    return "\n".join(chunks)
+
 
 HID_CPP_MARKER = "int HID_::availableReportPackets"
 HID_CPP_OUT_MARKER = "int HID_::availableOutReport"
@@ -91,56 +183,49 @@ _MOUSE_CPP_NEW_MOVE = (
 
 
 class IdentityPatcher:
-    """USB identity / fingerprint patches (device-specific)."""
+    """USB identity / fingerprint patches (device-specific).
+
+    Every edit is available twice: a pure ``*_content`` transform
+    (str -> str, raises PatchError on structural surprises) and a thin
+    public wrapper that applies it to disk atomically.
+    :func:`build_patch_edits` reuses the same transforms for dry-run.
+    """
 
     @staticmethod
-    def patch_usb_core(core_path: Path) -> None:
-        usb_core_file = core_path / "cores" / "arduino" / "USBCore.cpp"
-        if not usb_core_file.exists():
-            logger.error("USBCore.cpp not found: %s", usb_core_file)
-            return
-
-        content = usb_core_file.read_text(encoding="utf-8")
-
+    def _usb_core_disable_cdc(content: str) -> str:
         if CDC_COMMENT_MARKER in content:
-            logger.info("USB Core already patched (CDC disabled)")
-            return
-
+            return content
         content = re.sub(
             r"(CDC_GetInterface\(&interfaces\);)",
             r"// \1",
             content,
         )
-
         content = re.sub(
             r"(if \(CDC_ACM_INTERFACE == i\)\s*\n\s*)return CDC_Setup\(setup\);",
             r"\1// return CDC_Setup(setup);\n\t\treturn false;",
             content,
             flags=re.MULTILINE | re.DOTALL,
         )
-
-        usb_core_file.write_text(content, encoding="utf-8")
-        logger.info("USB Core patched (CDC disabled): %s", usb_core_file)
+        return content
 
     @staticmethod
-    def patch_boards_txt(core_path: Path, device: DeviceInfo) -> None:
-        boards_file = core_path / "boards.txt"
-        if not boards_file.exists():
-            logger.error("boards.txt not found: %s", boards_file)
-            return
+    def patch_usb_core(core_path: Path) -> None:
+        _apply_transform(
+            core_path / "cores" / "arduino" / "USBCore.cpp",
+            IdentityPatcher._usb_core_disable_cdc,
+            "CDC disabled",
+        )
 
-        content = boards_file.read_text()
+    @staticmethod
+    def _boards_txt_content(content: str, device: DeviceInfo) -> str:
+        """Rewrite the leonardo identity block; always explicit.
 
-        vid = hex(device.vendor_id)
-        pid = hex(device.product_id)
-
-        if f"leonardo.build.vid={vid}" in content and f"leonardo.build.pid={pid}" in content:
-            logger.info(
-                "boards.txt already matches device %04X:%04X, skipping",
-                device.vendor_id,
-                device.product_id,
-            )
-            return
+        Values are rebuilt on every run even when they match the stock
+        core (the always-explicit principle), so a profile edit is
+        picked up without depending on VID/PID change detection.
+        """
+        vid = f"0x{device.vendor_id:04X}"
+        pid = f"0x{device.product_id:04X}"
 
         content = re.sub(
             r"(leonardo\.build\.vid)\s*=\s*0x[0-9A-Fa-f]+",
@@ -176,94 +261,352 @@ class IdentityPatcher:
                 content,
             )
 
-        flags = (
-            f"{CDC_DISABLED_FLAG} {USB_EP_SIZE_FLAG} "
-            f"{USB_CONFIG_POWER_FLAG.format(max_power_ma=device.max_power_ma)}"
+        interval_ms = max(1, int(device.ep_interval_ms))
+        flags = " ".join(
+            [
+                CDC_DISABLED_FLAG,
+                USB_EP_SIZE_FLAG,
+                USB_CONFIG_POWER_FLAG.format(max_power_ma=device.max_power_ma),
+                USB_VERSION_FLAG.format(usb_version=device.usb_version),
+                USB_CONFIG_ATTRIBUTES_FLAG.format(bm_attributes=device.bm_attributes),
+                HID_EP_INTERVAL_FLAG.format(ep_interval_ms=interval_ms),
+                USB_EP0_MAX_PACKET_FLAG.format(
+                    ep0_max_packet_size=int(device.ep0_max_packet_size)
+                ),
+            ]
         )
         extra_flags_line = f"leonardo.build.extra_flags={{build.usb_flags}} {flags}"
         if not re.search(re.escape(extra_flags_line), content, flags=re.MULTILINE):
-            content = re.sub(
+            content, count = re.subn(
                 r"(leonardo\.build\.extra_flags=\{build\.usb_flags\})[^\r\n]*",
                 extra_flags_line,
                 content,
             )
+            if count == 0:
+                raise PatchError(
+                    "boards.txt: 'leonardo.build.extra_flags={build.usb_flags}' "
+                    "line not found. Re-run 'arduino-hub setup' to restore the "
+                    "stock core."
+                )
+        return content
 
-        boards_file.write_text(content)
-        logger.info(
-            "boards.txt patched for %04X:%04X (%s)",
-            device.vendor_id,
-            device.product_id,
-            device.product_string,
+    @staticmethod
+    def patch_boards_txt(core_path: Path, device: DeviceInfo) -> None:
+        _apply_transform(
+            core_path / "boards.txt",
+            lambda c: IdentityPatcher._boards_txt_content(c, device),
+            f"VID/PID {device.vendor_id:04X}:{device.product_id:04X}, "
+            f"strings, identity flags",
         )
+
+    @staticmethod
+    def _usbcore_ep0_alloc_content(content: str) -> str:
+        """Make EP0 bank size configurable AND make control transfers work.
+
+        Two coupled fixes, each independently idempotent:
+
+        1. Allocation: InitEP(0,...) routes through USB_EP0_ALLOC so the
+           hardware FIFO matches the declared bMaxPacketSize0.
+
+        2. SendControl bank-full release (root cause of the invisible-
+           device failure): stock code releases the FIFO every *64*
+           bytes via a hardcoded ``(_cmark + 1) & 0x3F`` mask. With a
+           32-byte bank, byte 33 is written into an already-full FIFO
+           and the next WaitForINOrOUT() spins forever inside the
+           control ISR — device freezes mid-enumeration (config
+           descriptor is 41 bytes: 18-byte device descriptor reads
+           fine, config kills it). Releasing every USB_EP0_MAX_PACKET
+           bytes keeps all chunk sizes legal (config 41 = 32+9, HID
+           report 77 = 32+32+13).
+        """
+        if "USB_EP0_ALLOC" not in content:
+            anchor = "#define EP_SINGLE_16 0x12"
+            if anchor not in content:
+                raise PatchError(
+                    "USBCore.cpp: EP_SINGLE_16 define not found; cannot insert "
+                    "the USB_EP0_ALLOC block. Re-run 'arduino-hub setup'."
+                )
+            additions = (
+                "#define EP_SINGLE_8 0x02\n"
+                "#define EP_SINGLE_32 0x22\n"
+                "// HUB_PATCH: EP0 hardware allocation follows the declared\n"
+                "// bMaxPacketSize0 (boards.txt -> -DUSB_EP0_MAX_PACKET=N).\n"
+                "#ifndef USB_EP0_MAX_PACKET\n"
+                "#define USB_EP0_MAX_PACKET 64\n"
+                "#endif\n"
+                "#if USB_EP0_MAX_PACKET == 8\n"
+                "#define USB_EP0_ALLOC EP_SINGLE_8\n"
+                "#elif USB_EP0_MAX_PACKET == 16\n"
+                "#define USB_EP0_ALLOC EP_SINGLE_16\n"
+                "#elif USB_EP0_MAX_PACKET == 32\n"
+                "#define USB_EP0_ALLOC EP_SINGLE_32\n"
+                "#else\n"
+                "#define USB_EP0_ALLOC EP_SINGLE_64\n"
+                "#endif\n"
+            )
+            content = content.replace(anchor, anchor + "\n" + additions, 1)
+
+            old_call = "InitEP(0,EP_TYPE_CONTROL,EP_SINGLE_64)"
+            if old_call not in content:
+                raise PatchError(
+                    "USBCore.cpp: InitEP(0,...) call not found; cannot route EP0 "
+                    "allocation through USB_EP0_ALLOC. Re-run 'arduino-hub setup'."
+                )
+            content = content.replace(
+                old_call, "InitEP(0,EP_TYPE_CONTROL,USB_EP0_ALLOC)", 1
+            )
+
+        if "% USB_EP0_MAX_PACKET" not in content:
+            old_mask = "if (!((_cmark + 1) & 0x3F))"
+            if old_mask not in content:
+                raise PatchError(
+                    "USBCore.cpp: stock SendControl bank-release line not "
+                    "found; cannot route it through USB_EP0_MAX_PACKET. "
+                    "Re-run 'arduino-hub setup'."
+                )
+            content = content.replace(
+                old_mask,
+                "if (!((_cmark + 1) % USB_EP0_MAX_PACKET))",
+                1,
+            )
+
+        return content
+
+    @staticmethod
+    def _usbcore_descriptor_content(content: str, device: DeviceInfo) -> str:
+        """Patch the device descriptor: EP0 size, bcdDevice, iSerialNumber.
+
+        Both D_DEVICE branches (CDC_ENABLED / CDC_DISABLED) are
+        rewritten; the pipeline always disables CDC first, so only the
+        second one compiles. Handles stock (ISERIAL/0x100/64) and
+        previously-patched forms alike. The declared EP0 size must be
+        backed by a matching hardware allocation — see
+        :meth:`_usbcore_ep0_alloc_content`.
+        """
+        ep0 = int(device.ep0_max_packet_size)
+        bcd = f"0x{device.bcd_device:X}"
+
+        expected = f",{ep0},USB_VID,USB_PID,{bcd},IMANUFACTURER,IPRODUCT,0,1)"
+        if expected not in content:
+            def repl(m: re.Match[str]) -> str:
+                return (
+                    f"{m.group(1)}{ep0}{m.group(2)}{bcd}{m.group(3)}0{m.group(4)}"
+                )
+
+            updated, count = _D_DEVICE_RE.subn(repl, content)
+            if count == 0:
+                raise PatchError(
+                    "USBCore.cpp: D_DEVICE(...) not found in a recognizable form; "
+                    "cannot patch EP0/bcdDevice/iSerialNumber. Re-run "
+                    "'arduino-hub setup' to restore the stock core."
+                )
+            content = updated
+            logger.debug("USBCore.cpp: %d D_DEVICE occurrence(s) rewritten", count)
+
+        return IdentityPatcher._usbcore_ep0_alloc_content(content)
 
     @staticmethod
     def patch_usbcore(core_path: Path, device: DeviceInfo) -> None:
-        """Patch the device descriptor: bcdDevice and iSerialNumber."""
-        usb_core_file = core_path / "cores" / "arduino" / "USBCore.cpp"
-        if not usb_core_file.exists():
-            logger.error("USBCore.cpp not found: %s", usb_core_file)
-            return
-
-        content = usb_core_file.read_text(encoding="utf-8")
-        bcd = f"0x{device.bcd_device:X}"
-
-        if f",{bcd},IMANUFACTURER,IPRODUCT,0,1)" in content:
-            logger.info("USBCore.cpp already patched (bcdDevice=%s, iSerialNumber=0)", bcd)
-            return
-
-        content = re.sub(
-            r"(D_DEVICE\([^)]*?,)0x100(,IMANUFACTURER,IPRODUCT,)ISERIAL(,1\))",
-            lambda m: f"{m.group(1)}{bcd}{m.group(2)}0{m.group(3)}",
-            content,
+        _apply_transform(
+            core_path / "cores" / "arduino" / "USBCore.cpp",
+            lambda c: IdentityPatcher._usbcore_descriptor_content(c, device),
+            f"EP0={device.ep0_max_packet_size}, bcdDevice=0x{device.bcd_device:X}, iSerialNumber 0",
         )
 
-        usb_core_file.write_text(content, encoding="utf-8")
-        logger.info("USBCore.cpp patched: bcdDevice=%s, iSerialNumber=0", bcd)
+    @staticmethod
+    def _usbc_h_attributes_content(content: str) -> str:
+        """Make D_CONFIG bmAttributes overridable via -DUSB_CONFIG_ATTRIBUTES."""
+        if USBCORE_H_MARKER in content:
+            if "USB_CONFIG_ATTRIBUTES, USB_CONFIG_POWER_MA(USB_CONFIG_POWER)" not in content:
+                raise PatchError(
+                    "USBCore.h: attributes guard is present but the D_CONFIG "
+                    "body is not routed through USB_CONFIG_ATTRIBUTES; the "
+                    "core is in an unexpected state. Re-run "
+                    "'arduino-hub setup'."
+                )
+            return content
+        guard = (
+            f"{USBCORE_H_VERSION_MARKER}\n"
+            "// Configuration attributes are overridable per cloned\n"
+            "// device: boards.txt passes -DUSB_CONFIG_ATTRIBUTES=0xNN.\n"
+            "#ifndef USB_CONFIG_ATTRIBUTES\n"
+            "#define USB_CONFIG_ATTRIBUTES "
+            "(USB_CONFIG_BUS_POWERED | USB_CONFIG_REMOTE_WAKEUP)\n"
+            "#endif\n"
+        )
+        anchor = "#define D_CONFIG(_totalLength,_interfaces) \\"
+        if anchor not in content:
+            raise PatchError(
+                "USBCore.h: D_CONFIG macro not found; cannot insert the "
+                "attributes guard. Re-run 'arduino-hub setup'."
+            )
+        content = content.replace(anchor, guard + "\n" + anchor, 1)
+
+        body_old = (
+            "USB_CONFIG_BUS_POWERED | USB_CONFIG_REMOTE_WAKEUP, "
+            "USB_CONFIG_POWER_MA(USB_CONFIG_POWER)"
+        )
+        if body_old not in content:
+            raise PatchError(
+                "USBCore.h: D_CONFIG body does not match the expected "
+                "stock form; cannot route bmAttributes through "
+                "USB_CONFIG_ATTRIBUTES."
+            )
+        return content.replace(
+            body_old,
+            "USB_CONFIG_ATTRIBUTES, USB_CONFIG_POWER_MA(USB_CONFIG_POWER)",
+            1,
+        )
+
+    @staticmethod
+    def patch_usbc_h(core_path: Path) -> None:
+        _apply_transform(
+            core_path / "cores" / "arduino" / "USBCore.h",
+            IdentityPatcher._usbc_h_attributes_content,
+            "bmAttributes overridable (USB_CONFIG_ATTRIBUTES)",
+        )
+
+    @staticmethod
+    def _hid_h_identity_content(content: str, device: DeviceInfo) -> str:
+        """Rewrite the D_HIDREPORT literal: bcdHID (both bytes) + country.
+
+        The macro follows the HID spec wire layout — byte 2 is the LOW
+        bcdHID byte and byte 4 is bCountryCode (the neighbouring
+        HIDDescDescriptor struct mislabels them as addr/versionH).
+        Earlier patcher versions wrote the low byte into the HIGH
+        position, producing 0x1101 on the wire instead of 0x0111; this
+        transform also migrates such cores.
+        """
+        low = device.bcd_hid & 0xFF
+        high = (device.bcd_hid >> 8) & 0xFF
+        country = device.country_code & 0xFF
+
+        expected = (
+            f"D_HIDREPORT(length) {{ 9, 0x21, 0x{low:02X}, 0x{high:02X}, "
+            f"0x{country:02X}, 1, 0x22"
+        )
+        if expected in content:
+            return content
+
+        def repl(m: re.Match[str]) -> str:
+            return (
+                f"{m.group(1)}0x{low:02X}"
+                f"{m.group(2)}0x{high:02X}"
+                f"{m.group(3)}0x{country:02X}"
+                f"{m.group(4)}"
+            )
+
+        updated, count = _D_HIDREPORT_RE.subn(repl, content)
+        if count == 0:
+            raise PatchError(
+                "HID.h: D_HIDREPORT(...) not found in a recognizable form; "
+                "cannot patch bcdHID/country code. Re-run 'arduino-hub setup' "
+                "to restore the stock core."
+            )
+        return updated
+
+    @staticmethod
+    def _hid_cpp_policy_content(content: str) -> str:
+        policy = f"{HID_POLICY_SUBCLASS}, {HID_POLICY_PROTOCOL}"
+        if policy in content:
+            return content
+        old = "HID_SUBCLASS_NONE, HID_PROTOCOL_NONE"
+        if old not in content:
+            raise PatchError(
+                "HID.cpp: interface descriptor policy anchor not found; "
+                "cannot apply the boot mouse policy. Re-run "
+                "'arduino-hub setup'."
+            )
+        return content.replace(old, policy)
 
     @staticmethod
     def patch_hid(core_path: Path, device: DeviceInfo) -> None:
-        """Patch HID interface: bcdHID (HID.h) and subclass/protocol (HID.cpp)."""
+        """Patch HID interface: bcdHID+country (HID.h), boot policy (HID.cpp)."""
         hid_dir = core_path / "libraries" / "HID" / "src"
-        hid_h_file = hid_dir / "HID.h"
-        hid_cpp_file = hid_dir / "HID.cpp"
+        _apply_transform(
+            hid_dir / "HID.h",
+            lambda c: IdentityPatcher._hid_h_identity_content(c, device),
+            f"bcdHID 0x{device.bcd_hid:04X}, country 0x{device.country_code:02X}",
+        )
+        _apply_transform(
+            hid_dir / "HID.cpp",
+            IdentityPatcher._hid_cpp_policy_content,
+            "subclass 1 / protocol 2 (boot mouse policy)",
+        )
 
-        version_l = device.bcd_hid & 0xFF
-        target_item = f"9, 0x21, 0x01, 0x{version_l:02X}, 0, 1, 0x22"
-        if hid_h_file.exists():
-            content = hid_h_file.read_text(encoding="utf-8")
-            if re.search(rf"D_HIDREPORT\(length\) \{{ {re.escape(target_item)}", content):
-                logger.info("HID.h already patched (bcdHID 0x%04X)", device.bcd_hid)
-            else:
-                content = re.sub(
-                    r"(D_HIDREPORT\(length\) \{ 9, 0x21, 0x01,) 0x[0-9A-Fa-f]{2}(, 0, 1, 0x22)",
-                    rf"\1 0x{version_l:02X}\2",
-                    content,
-                )
-                hid_h_file.write_text(content, encoding="utf-8")
-                logger.info("HID.h patched: bcdHID 0x%04X", device.bcd_hid)
-        else:
-            logger.error("HID.h not found: %s", hid_h_file)
 
-        policy = f"{HID_POLICY_SUBCLASS}, {HID_POLICY_PROTOCOL}"
-        if hid_cpp_file.exists():
-            content = hid_cpp_file.read_text(encoding="utf-8")
-            if policy in content:
-                logger.info("HID.cpp already patched (boot mouse policy)")
-            else:
-                content = content.replace(
-                    "HID_SUBCLASS_NONE, HID_PROTOCOL_NONE", policy
-                )
-                hid_cpp_file.write_text(content, encoding="utf-8")
-                logger.info(
-                    "HID.cpp patched: subclass/protocol = %s/%s",
-                    HID_POLICY_SUBCLASS,
-                    HID_POLICY_PROTOCOL,
-                )
-        else:
-            logger.error("HID.cpp not found: %s", hid_cpp_file)
+def _apply_transform(path: Path, transform, description: str) -> None:
+    """Read a file, apply a content transform, write back if changed."""
+    if not path.exists():
+        raise PatchError(f"{path} not found. Re-run 'arduino-hub setup'.")
+    original = path.read_text(encoding="utf-8")
+    updated = transform(original)
+    if updated != original:
+        _atomic_write_text(path, updated)
+        logger.info("%s patched: %s", path.name, description)
+    else:
+        logger.info("%s already up to date (%s)", path.name, description)
 
 class LibraryPatcher:
     """Mouse library + HubCommand install + PC client headers."""
+
+    @staticmethod
+    def _profile_and_mapper_texts(
+        source: DeviceInfo, target: TargetProfile
+    ) -> tuple[str, str]:
+        descriptor = generate_report_descriptor(target) + generate_command_descriptor(
+            target.command, target.capability
+        )
+        profile_text = generate_hid_profile_h(target, descriptor)
+        mapper_text = generate_hid_mapper_h(source, target)
+        return profile_text, mapper_text
+
+    @staticmethod
+    def _mouse_cpp_content(content: str) -> str:
+        """Marker-guarded Mouse.cpp edits: includes, descriptor, move()."""
+        if '#include "hid_profile.h"' not in content:
+            content = content.replace(
+                '#include "Mouse.h"',
+                '#include "Mouse.h"\n#include "hid_profile.h"\n#include "hid_mapper.h"',
+            )
+
+        if "static HIDSubDescriptor node(HID_DESCRIPTOR" not in content:
+            content = re.sub(
+                r"static const uint8_t _hidReportDescriptor\[\] PROGMEM = \{.*?\};",
+                "",
+                content,
+                count=1,
+                flags=re.DOTALL,
+            )
+            content = content.replace(
+                "static HIDSubDescriptor node(_hidReportDescriptor, sizeof(_hidReportDescriptor));",
+                "static HIDSubDescriptor node(HID_DESCRIPTOR, sizeof(HID_DESCRIPTOR));",
+            )
+
+        if "encode_output(state, m)" not in content:
+            if _MOUSE_CPP_OLD_MOVE not in content:
+                logger.warning("Mouse.cpp: move() body not found, patch skipped")
+            else:
+                content = content.replace(_MOUSE_CPP_OLD_MOVE, _MOUSE_CPP_NEW_MOVE)
+
+        if "Mouse_::buttons(uint16_t b)" not in content:
+            content = content.replace("uint8_t b)", "uint16_t b)")
+
+        return content
+
+    @staticmethod
+    def _mouse_h_content(content: str) -> str:
+        """Marker-guarded Mouse.h edits: move() signature, uint16_t buttons."""
+        if "int16_t x, int16_t y, int16_t wheel" not in content:
+            content = re.sub(
+                r"void move\(signed char x, signed char y, signed char wheel = 0\);",
+                "void move(int16_t x, int16_t y, int16_t wheel = 0, int16_t pan = 0);",
+                content,
+            )
+        if "uint16_t _buttons;" not in content:
+            content = content.replace("uint8_t _buttons;", "uint16_t _buttons;")
+            content = content.replace("uint8_t b", "uint16_t b")
+        return content
 
     @staticmethod
     def patch_mouse_library(
@@ -282,83 +625,40 @@ class LibraryPatcher:
         """
         lib_path.mkdir(parents=True, exist_ok=True)
 
-        descriptor = generate_report_descriptor(target) + generate_command_descriptor(
-            target.command, target.capability
+        profile_text, mapper_text = LibraryPatcher._profile_and_mapper_texts(
+            source, target
         )
         profile_file = lib_path / "hid_profile.h"
         mapper_file = lib_path / "hid_mapper.h"
-        profile_file.write_text(
-            generate_hid_profile_h(target, descriptor), encoding="utf-8"
-        )
-        mapper_file.write_text(
-            generate_hid_mapper_h(source, target), encoding="utf-8"
-        )
+        if (
+            not profile_file.exists()
+            or profile_file.read_text(encoding="utf-8") != profile_text
+        ):
+            _atomic_write_text(profile_file, profile_text)
+        if _read_or_empty(mapper_file) != mapper_text:
+            _atomic_write_text(mapper_file, mapper_text)
         logger.info(
-            "Generated %s (descriptor %d bytes) and %s",
-            profile_file.name,
-            len(descriptor),
-            mapper_file.name,
+            "Generated %s and %s", profile_file.name, mapper_file.name
         )
 
         mouse_cpp_file = lib_path / "Mouse.cpp"
         if not mouse_cpp_file.exists():
-            logger.error("Mouse.cpp not found: %s", mouse_cpp_file)
-            return
-        content = mouse_cpp_file.read_text(encoding="utf-8")
-
-        if '#include "hid_profile.h"' not in content:
-            content = content.replace(
-                '#include "Mouse.h"',
-                '#include "Mouse.h"\n#include "hid_profile.h"\n#include "hid_mapper.h"',
-            )
-            logger.info("Mouse.cpp: includes added")
-
-        if "static HIDSubDescriptor node(HID_DESCRIPTOR" not in content:
-            content = re.sub(
-                r"static const uint8_t _hidReportDescriptor\[\] PROGMEM = \{.*?\};",
-                "",
-                content,
-                count=1,
-                flags=re.DOTALL,
-            )
-            content = content.replace(
-                "static HIDSubDescriptor node(_hidReportDescriptor, sizeof(_hidReportDescriptor));",
-                "static HIDSubDescriptor node(HID_DESCRIPTOR, sizeof(HID_DESCRIPTOR));",
-            )
-            logger.info("Mouse.cpp: descriptor replaced by HID_DESCRIPTOR")
-
-        if "encode_output(state, m)" not in content:
-            if _MOUSE_CPP_OLD_MOVE not in content:
-                logger.warning("Mouse.cpp: move() body not found, patch skipped")
-            else:
-                content = content.replace(_MOUSE_CPP_OLD_MOVE, _MOUSE_CPP_NEW_MOVE)
-                logger.info("Mouse.cpp: move() rewritten to encode->SendReport")
-
-        if "Mouse_::buttons(uint16_t b)" not in content:
-            content = content.replace("uint8_t b)", "uint16_t b)")
-            logger.info("Mouse.cpp: buttons widened to uint16_t")
-
-        mouse_cpp_file.write_text(content, encoding="utf-8")
+            raise PatchError(f"Mouse.cpp not found: {mouse_cpp_file}")
+        _apply_transform(
+            mouse_cpp_file,
+            lambda c: LibraryPatcher._mouse_cpp_content(c),
+            "includes + HID_DESCRIPTOR + encode->SendReport + uint16_t buttons",
+        )
 
         mouse_h_file = lib_path / "Mouse.h"
         if mouse_h_file.exists():
-            content = mouse_h_file.read_text(encoding="utf-8")
-            if "int16_t x, int16_t y, int16_t wheel" not in content:
-                content = re.sub(
-                    r"void move\(signed char x, signed char y, signed char wheel = 0\);",
-                    "void move(int16_t x, int16_t y, int16_t wheel = 0, int16_t pan = 0);",
-                    content,
-                )
-                mouse_h_file.write_text(content, encoding="utf-8")
-                logger.info("Mouse.h: move() signature updated")
-
-            if "uint16_t _buttons;" not in content:
-                content = content.replace("uint8_t _buttons;", "uint16_t _buttons;")
-                content = content.replace("uint8_t b", "uint16_t b")
-                mouse_h_file.write_text(content, encoding="utf-8")
-                logger.info("Mouse.h: buttons widened to uint16_t")
+            _apply_transform(
+                mouse_h_file,
+                LibraryPatcher._mouse_h_content,
+                "move(int16_t ...) signature, uint16_t buttons",
+            )
         else:
-            logger.error("Mouse.h not found: %s", mouse_h_file)
+            raise PatchError(f"Mouse.h not found: {mouse_h_file}")
 
     # ── PC → Arduino command channel ─────────────────────────────
 
@@ -373,8 +673,9 @@ class LibraryPatcher:
             return Path()
         dst_dir = base_dir / HUB_COMMAND_RELATIVE
         shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
-        (dst_dir / "src" / commands_header_name(schema)).write_text(
-            generate_commands_h(schema), encoding="utf-8"
+        _atomic_write_text(
+            dst_dir / "src" / commands_header_name(schema),
+            generate_commands_h(schema),
         )
         logger.info("HubCommand library installed: %s", dst_dir)
         return dst_dir
@@ -388,14 +689,13 @@ class LibraryPatcher:
         """Generate the shared headers for the PC C++ client."""
         gen_dir = base_dir / PC_CLIENT_TARGET_DIR
         gen_dir.mkdir(parents=True, exist_ok=True)
-        (gen_dir / commands_header_name(schema)).write_text(
-            generate_commands_h(schema), encoding="utf-8"
+        _atomic_write_text(
+            gen_dir / commands_header_name(schema),
+            generate_commands_h(schema),
         )
-        (gen_dir / "command_channel.h").write_text(
-            generate_hid_command_config_h(
-                target.command, target.capability, schema
-            ),
-            encoding="utf-8",
+        _atomic_write_text(
+            gen_dir / "command_channel.h",
+            generate_hid_command_config_h(target.command, target.capability, schema),
         )
         logger.info("PC client headers written: %s", gen_dir)
 
@@ -419,14 +719,11 @@ class CommandChannelPatcher:
         schema.validate(CMD_PAYLOAD_LEN)
         hid_dir = core_path / "libraries" / "HID" / "src"
         if not hid_dir.exists():
-            logger.error("HID library not found: %s", hid_dir)
-            return
+            raise PatchError(f"HID library not found: {hid_dir}")
         config_file = hid_dir / _HID_COMMAND_CONFIG_NAME
-        config_file.write_text(
-            generate_hid_command_config_h(
-                target.command, target.capability, schema
-            ),
-            encoding="utf-8",
+        _atomic_write_text(
+            config_file,
+            generate_hid_command_config_h(target.command, target.capability, schema),
         )
         logger.info(
             "Generated %s (command=%s, transport=%s, slots=%d, capability=%s)",
@@ -452,14 +749,27 @@ class CommandChannelPatcher:
         """
         hid_dir = core_path / "libraries" / "HID" / "src"
         if not hid_dir.exists():
-            logger.error("HID library not found: %s", hid_dir)
-            return
+            raise PatchError(f"HID library not found: {hid_dir}")
         blob_file = hid_dir / _HID_CAPABILITY_BLOB_NAME
-        blob_file.write_text(
+        _atomic_write_text(
+            blob_file,
             generate_hid_capability_blob_h(target.command, schema),
-            encoding="utf-8",
         )
         logger.info("Generated %s", blob_file.name)
+
+    @staticmethod
+    def _updated_hid_h(content: str) -> tuple[str, bool]:
+        """Version-gated HID.h transform: (new content, changed)."""
+        if _get_patch_version(content) >= HID_H_PATCH_VERSION:
+            return content, False
+        return CommandChannelPatcher._patch_hid_h(content), True
+
+    @staticmethod
+    def _updated_hid_cpp(content: str) -> tuple[str, bool]:
+        """Version-gated HID.cpp transform: (new content, changed)."""
+        if _get_patch_version(content) >= HID_CPP_PATCH_VERSION:
+            return content, False
+        return CommandChannelPatcher._patch_hid_cpp(content), True
 
     @staticmethod
     def patch_hid_command_core(core_path: Path) -> None:
@@ -483,29 +793,26 @@ class CommandChannelPatcher:
         hid_h_file = hid_dir / "HID.h"
         hid_cpp_file = hid_dir / "HID.cpp"
 
-        if hid_h_file.exists():
-            content = hid_h_file.read_text(encoding="utf-8")
-            if _get_patch_version(content) >= HID_H_PATCH_VERSION:
-                logger.info(
-                    "HID.h already patched at v%d, skipping", HID_H_PATCH_VERSION
-                )
-            else:
-                content = CommandChannelPatcher._patch_hid_h(content)
-                hid_h_file.write_text(content, encoding="utf-8")
-        else:
-            logger.error("HID.h not found: %s", hid_h_file)
+        _apply_transform(
+            hid_h_file,
+            CommandChannelPatcher._updated_hid_h_content,
+            "command channel declarations",
+        )
+        _apply_transform(
+            hid_cpp_file,
+            CommandChannelPatcher._updated_hid_cpp_content,
+            "command channel core (SET_REPORT ring, capability, interval, class requests)",
+        )
 
-        if hid_cpp_file.exists():
-            content = hid_cpp_file.read_text(encoding="utf-8")
-            if _get_patch_version(content) >= HID_CPP_PATCH_VERSION:
-                logger.info(
-                    "HID.cpp already patched at v%d, skipping", HID_CPP_PATCH_VERSION
-                )
-            else:
-                content = CommandChannelPatcher._patch_hid_cpp(content)
-                hid_cpp_file.write_text(content, encoding="utf-8")
-        else:
-            logger.error("HID.cpp not found: %s", hid_cpp_file)
+    @staticmethod
+    def _updated_hid_h_content(content: str) -> str:
+        updated, _ = CommandChannelPatcher._updated_hid_h(content)
+        return updated
+
+    @staticmethod
+    def _updated_hid_cpp_content(content: str) -> str:
+        updated, _ = CommandChannelPatcher._updated_hid_cpp(content)
+        return updated
 
     @staticmethod
     def _stamp_version(content: str, anchor: str, version: int) -> str:
@@ -701,6 +1008,61 @@ class CommandChannelPatcher:
         """Apply all HID.cpp command-channel edits + version marker."""
         content = CommandChannelPatcher._upgrade_hid_cpp(content)
 
+        # ── v3 identity parity ────────────────────────────────────
+        # Interrupt endpoint polling interval (bInterval) comes from
+        # boards.txt (-DHID_EP_INTERVAL=0xNN); the define must exist
+        # even without the flag so the core stays self-contained.
+        if "#ifndef HID_EP_INTERVAL" not in content:
+            content = content.replace(
+                '#include "HID.h"',
+                '#include "HID.h"\n'
+                "\n"
+                "// Interrupt endpoint polling interval (bInterval),\n"
+                "// overridable per cloned device via boards.txt\n"
+                "// -DHID_EP_INTERVAL=0xNN.\n"
+                "#ifndef HID_EP_INTERVAL\n"
+                "#define HID_EP_INTERVAL 0x01\n"
+                "#endif",
+                1,
+            )
+
+        # Every interrupt-endpoint descriptor (IN and, once added below,
+        # OUT) references the macro instead of a hardcoded 1 ms.
+        content = content.replace(
+            "USB_ENDPOINT_TYPE_INTERRUPT, USB_EP_SIZE, 0x01)",
+            "USB_ENDPOINT_TYPE_INTERRUPT, USB_EP_SIZE, HID_EP_INTERVAL)",
+        )
+
+        # Spec-correct answers for the remaining class requests: hosts
+        # that probe them currently get an empty packet (GET_PROTOCOL)
+        # or a stall (GET_IDLE).
+        if "USB_SendControl(0, &protocol, 1)" not in content:
+            content = content.replace(
+                "\t\tif (request == HID_GET_PROTOCOL) {\n"
+                "\t\t\t// TODO: Send8(protocol);\n"
+                "\t\t\treturn true;\n"
+                "\t\t}",
+                "\t\tif (request == HID_GET_PROTOCOL) {\n"
+                "\t\t\t// Spec answer: report the active protocol\n"
+                "\t\t\t// (boot=0 / report=1).\n"
+                "\t\t\treturn USB_SendControl(0, &protocol, 1) > 0;\n"
+                "\t\t}",
+                1,
+            )
+        if "USB_SendControl(0, &idle, 1)" not in content:
+            content = content.replace(
+                "\t\tif (request == HID_GET_IDLE) {\n"
+                "\t\t\t// TODO: Send8(idle);\n"
+                "\t\t}",
+                "\t\tif (request == HID_GET_IDLE) {\n"
+                "\t\t\t// Spec answer: the stored idle rate instead of a\n"
+                "\t\t\t// stall.\n"
+                "\t\t\treturn USB_SendControl(0, &idle, 1) > 0;\n"
+                "\t\t}",
+                1,
+            )
+        # ──────────────────────────────────────────────────────────
+
         # Capability blob: serve the generated header, never inline the
         # structure (R3: single source of truth in command_generator).
         if '#include "hid_capability_blob.h"' not in content:
@@ -863,7 +1225,7 @@ class CommandChannelPatcher:
                 "\tHIDDescriptor hidInterface = {\n"
                 "\t\tD_INTERFACE(pluggedInterface, 1, USB_DEVICE_CLASS_HUMAN_INTERFACE, HID_SUBCLASS_BOOT_INTERFACE, HID_PROTOCOL_MOUSE),\n"
                 "\t\tD_HIDREPORT(descriptorSize),\n"
-                "\t\tD_ENDPOINT(USB_ENDPOINT_IN(pluggedEndpoint), USB_ENDPOINT_TYPE_INTERRUPT, USB_EP_SIZE, 0x01)\n"
+                "\t\tD_ENDPOINT(USB_ENDPOINT_IN(pluggedEndpoint), USB_ENDPOINT_TYPE_INTERRUPT, USB_EP_SIZE, HID_EP_INTERVAL)\n"
                 "\t};\n"
                 "\treturn USB_SendControl(0, &hidInterface, sizeof(hidInterface));\n"
                 "}\n",
@@ -879,10 +1241,10 @@ class CommandChannelPatcher:
                 "#endif\n"
                 "\t\t            USB_DEVICE_CLASS_HUMAN_INTERFACE, HID_SUBCLASS_BOOT_INTERFACE, HID_PROTOCOL_MOUSE),\n"
                 "\t\tD_HIDREPORT(descriptorSize),\n"
-                "\t\tD_ENDPOINT(USB_ENDPOINT_IN(pluggedEndpoint), USB_ENDPOINT_TYPE_INTERRUPT, USB_EP_SIZE, 0x01)\n"
+                "\t\tD_ENDPOINT(USB_ENDPOINT_IN(pluggedEndpoint), USB_ENDPOINT_TYPE_INTERRUPT, USB_EP_SIZE, HID_EP_INTERVAL)\n"
                 "#if HID_COMMAND_ENABLED && HID_COMMAND_TRANSPORT == HID_COMMAND_TRANSPORT_INTERRUPT_OUT\n"
                 "\t\t,\n"
-                "\t\tD_ENDPOINT(USB_ENDPOINT_OUT(pluggedEndpoint + 1), USB_ENDPOINT_TYPE_INTERRUPT, USB_EP_SIZE, 0x01)\n"
+                "\t\tD_ENDPOINT(USB_ENDPOINT_OUT(pluggedEndpoint + 1), USB_ENDPOINT_TYPE_INTERRUPT, USB_EP_SIZE, HID_EP_INTERVAL)\n"
                 "#endif\n"
                 "\t};\n"
                 "\treturn USB_SendControl(0, &hidInterface, sizeof(hidInterface));\n"
@@ -970,6 +1332,209 @@ class CommandChannelPatcher:
             content, '#include "HID.h"\n', HID_CPP_PATCH_VERSION
         )
 
+def build_patch_edits(
+    base_dir: Path,
+    core_path: Path,
+    device: DeviceInfo,
+    target: TargetProfile,
+    schema: CommandSchema,
+) -> list[FileEdit]:
+    """Compute every file change of a patch run entirely in memory.
+
+    Reads the current state of each target file and applies the same
+    transforms the public patch_* wrappers use, so ``apply_edits`` and
+    dry-run diffs always agree with a real run.
+    """
+    edits: list[FileEdit] = []
+
+    def add_transform(path: Path, description: str, transform) -> None:
+        original = _read_or_empty(path)
+        edits.append(
+            FileEdit(
+                path=path,
+                description=description,
+                original=original,
+                updated=transform(original),
+            )
+        )
+
+    def add_content(path: Path, description: str, updated: str) -> None:
+        edits.append(
+            FileEdit(
+                path=path,
+                description=description,
+                original=_read_or_empty(path),
+                updated=updated,
+            )
+        )
+
+    hid_src = core_path / "libraries" / "HID" / "src"
+
+    # ── Core identity ────────────────────────────────────────────
+    add_transform(
+        core_path / "boards.txt",
+        f"VID/PID {device.vendor_id:04X}:{device.product_id:04X}, strings, "
+        f"CDC off, EP_SIZE=16, power/bcdUSB/bmAttributes/bInterval flags",
+        lambda c: IdentityPatcher._boards_txt_content(c, device),
+    )
+    add_transform(
+        core_path / "cores" / "arduino" / "USBCore.cpp",
+        f"EP0={device.ep0_max_packet_size}, bcdDevice=0x{device.bcd_device:X}, "
+        f"iSerialNumber 0, CDC disabled",
+        lambda c: IdentityPatcher._usbcore_descriptor_content(
+            IdentityPatcher._usb_core_disable_cdc(c), device
+        ),
+    )
+    add_transform(
+        core_path / "cores" / "arduino" / "USBCore.h",
+        "bmAttributes overridable (USB_CONFIG_ATTRIBUTES guard)",
+        IdentityPatcher._usbc_h_attributes_content,
+    )
+
+    def _hid_h(c: str) -> str:
+        c = IdentityPatcher._hid_h_identity_content(c, device)
+        c, _ = CommandChannelPatcher._updated_hid_h(c)
+        return c
+
+    add_transform(hid_src / "HID.h", "bcdHID/country + command channel declarations", _hid_h)
+
+    def _hid_cpp(c: str) -> str:
+        c = IdentityPatcher._hid_cpp_policy_content(c)
+        c, _ = CommandChannelPatcher._updated_hid_cpp(c)
+        return c
+
+    add_transform(
+        hid_src / "HID.cpp",
+        "boot mouse policy + command channel core + interval/class-request parity",
+        _hid_cpp,
+    )
+
+    # ── Generated core headers (rewritten on every run) ──────────
+    config_text = generate_hid_command_config_h(target.command, target.capability, schema)
+    blob_text = generate_hid_capability_blob_h(target.command, schema)
+    command_desc = (
+        f"command={target.command.enabled}, transport={target.command.transport}, "
+        f"slots={target.command.queue_slots}, capability={target.capability.enabled}"
+    )
+    add_content(hid_src / _HID_COMMAND_CONFIG_NAME, command_desc, config_text)
+    add_content(
+        hid_src / _HID_CAPABILITY_BLOB_NAME,
+        "generated capability payload (HID_CAPABILITY_BLOB)",
+        blob_text,
+    )
+
+    # ── Mouse library ────────────────────────────────────────────
+    lib_path = base_dir / MOUSE_LIB_RELATIVE
+    profile_text, mapper_text = LibraryPatcher._profile_and_mapper_texts(device, target)
+    descriptor_len = len(generate_report_descriptor(target)) + len(
+        generate_command_descriptor(target.command, target.capability)
+    )
+    add_content(
+        lib_path / "hid_profile.h",
+        f"target report descriptor ({descriptor_len} bytes incl. vendor collection)",
+        profile_text,
+    )
+    add_content(lib_path / "hid_mapper.h", "decode_input/encode_output", mapper_text)
+
+    mouse_cpp = lib_path / "Mouse.cpp"
+    if not mouse_cpp.exists():
+        raise PatchError(f"Mouse.cpp not found: {mouse_cpp}")
+    add_transform(
+        mouse_cpp,
+        "includes + HID_DESCRIPTOR + encode->SendReport + uint16_t buttons",
+        LibraryPatcher._mouse_cpp_content,
+    )
+    mouse_h = lib_path / "Mouse.h"
+    if not mouse_h.exists():
+        raise PatchError(f"Mouse.h not found: {mouse_h}")
+    add_transform(mouse_h, "move(int16_t ...) signature, uint16_t buttons", LibraryPatcher._mouse_h_content)
+
+    # ── HubCommand library (copy from repo + generated opcodes) ──
+    src_root = base_dir / HUB_COMMAND_SOURCE_DIR
+    dst_root = base_dir / HUB_COMMAND_RELATIVE
+    if not src_root.is_dir():
+        raise PatchError(f"HubCommand source library not found: {src_root}")
+    for src_file in sorted(src_root.rglob("*")):
+        if src_file.is_file():
+            rel = src_file.relative_to(src_root)
+            add_content(
+                dst_root / rel,
+                f"install HubCommand/{rel.as_posix()}",
+                src_file.read_text(encoding="utf-8"),
+            )
+    add_content(
+        dst_root / "src" / commands_header_name(schema),
+        "generated opcodes + wire-format macros",
+        generate_commands_h(schema),
+    )
+
+    # ── PC client headers ────────────────────────────────────────
+    client_dir = base_dir / PC_CLIENT_TARGET_DIR
+    add_content(
+        client_dir / commands_header_name(schema),
+        "generated opcodes + wire-format macros (PC side)",
+        generate_commands_h(schema),
+    )
+    add_content(client_dir / "command_channel.h", "command channel wiring (PC side)", config_text)
+
+    return edits
+
+
+def build_manifest_patches(
+    device: DeviceInfo,
+    target: TargetProfile,
+    client_out: Path | None,
+    layout_warnings: list[str],
+    validation_issues: list[ValidationIssue],
+) -> dict[str, str]:
+    """Human-readable patch summary recorded in .build/patches.json."""
+    if target.command.enabled:
+        command_desc = (
+            f"transport={target.command.transport}, "
+            f"slots={target.command.queue_slots}, "
+            f"payload={CMD_PAYLOAD_LEN}"
+        )
+    else:
+        command_desc = "disabled"
+
+    patches = {
+        "boards.txt": (
+            f"VID/PID {device.vendor_id:04X}:{device.product_id:04X}, strings, "
+            f"CDC_DISABLED, USB_EP_SIZE=16, USB_CONFIG_POWER={device.max_power_ma}, "
+            f"USB_VERSION=0x{device.usb_version:04X}, "
+            f"USB_CONFIG_ATTRIBUTES=0x{device.bm_attributes:02X}, "
+            f"HID_EP_INTERVAL=0x{max(1, device.ep_interval_ms):02X}, "
+            f"USB_EP0_MAX_PACKET={int(device.ep0_max_packet_size)}"
+        ),
+        "USBCore.cpp": (
+            f"EP0={device.ep0_max_packet_size} (descriptor + USB_EP0_ALLOC), "
+            f"bcdDevice 0x{device.bcd_device:X}, iSerialNumber 0, CDC disabled"
+        ),
+        "USBCore.h": f"bmAttributes overridable (USB_CONFIG_ATTRIBUTES=0x{device.bm_attributes:02X})",
+        "HID.h": (
+            f"bcdHID 0x{device.bcd_hid:04X} (both bytes), "
+            f"country 0x{device.country_code:02X}"
+        ),
+        "HID.cpp": (
+            "subclass 1 / protocol 2 (boot mouse policy), bInterval via "
+            "HID_EP_INTERVAL, GET_IDLE/GET_PROTOCOL spec answers"
+        ),
+        "Mouse.cpp": "includes + move() decode->encode->SendReport",
+        "Mouse.h": "move(int16_t x, int16_t y, int16_t wheel, int16_t pan), uint16_t buttons",
+        "hid_command_config.h": command_desc,
+        "hid_capability_blob.h": "generated capability payload (HID_CAPABILITY_BLOB)",
+        "HID.cpp/HID.h command": "SET_REPORT(Output|Feature) ring buffer, GET_REPORT(Feature)",
+        "HubCommand": "MouseCommandHandler + transports",
+        "pc_client/target": "mouse_commands.h + command_channel.h",
+    }
+    if client_out is not None:
+        patches["client export"] = str(client_out)
+    if layout_warnings:
+        patches["source layout"] = "; ".join(layout_warnings)
+    patches["validation"] = summarize(validation_issues)
+    return patches
+
+
 def write_patch_manifest(
     base_dir: Path,
     device_name: str,
@@ -994,8 +1559,8 @@ def write_patch_manifest(
         "generated": generated,
     }
     manifest_file = build_dir / "patches.json"
-    manifest_file.write_text(
+    _atomic_write_text(
+        manifest_file,
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
     )
     logger.info("Patch manifest written: %s", manifest_file)

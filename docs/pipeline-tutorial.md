@@ -126,54 +126,50 @@ arduino-hub flash --device g305 --target generic_5btn \
 1. Загрузка профилей: `profiles/sources/<name>.json`, `profiles/targets/<target>.json`,
    `profiles/protocol/mouse.json` (схема нужна всегда — из неё генерируются
    `mouse_commands.h` и поля capability).
-2. `IdentityPatcher.patch_usb_core()` — отключение CDC в `USBCore.cpp`:
-   комментарируется `CDC_GetInterface(&interfaces);` и ветка
-   `CDC_Setup(setup)` (заменяется на `return false`).
-3. `IdentityPatcher.patch_boards_txt()` — в `boards.txt` для `leonardo`:
-   `build.vid`, `build.pid`, `usb_product`, `usb_manufacturer` (из устройства),
-   и `build.extra_flags` = `{build.usb_flags} -DCDC_DISABLED -DUSB_EP_SIZE=16
-   -DUSB_CONFIG_POWER=<max_power_ma>`.
-   `USB_EP_SIZE=16` — чтобы interrupt-пакеты были по 16 байт
-   (совместимость с hidapi-буфером `[ID][payload]`).
-4. `IdentityPatcher.patch_usbcore()` — в `D_DEVICE(...)`: bcdDevice ← устройства,
-   iSerialNumber → 0 (без серийника — предсказуемое перечисление).
-5. `IdentityPatcher.patch_hid()` — в `HID.h` младший байт bcdHID ← устройства;
-   в `HID.cpp` subclass/protocol интерфейса → `HID_SUBCLASS_BOOT_INTERFACE,
-   HID_PROTOCOL_MOUSE` (boot mouse policy; намеренно не берётся из устройства).
-6. `CommandChannelPatcher.write_hid_command_config()` — генерирует
-   `hid_command_config.h` в ядро (`libraries/HID/src/`): включение канала,
-   коды транспортов, фиксированные константы репорта (id 3, payload 15,
-   total 16), число слотов очереди, `HID_CAPABILITY_*`, device_type и
-   protocol_version из схемы. Валидирует профиль канала и схему (payload 15).
-   Файл перезаписывается **на каждом** patch (пер-таргетная проводка),
-   тогда как правки HID.h/HID.cpp применяются один раз.
-7. `CommandChannelPatcher.patch_hid_command_core()` — маркер-охраняемые правки
-   HID.h/HID.cpp (см. раздел 6.2). Если канал включён, а правка не легла —
-   пайплайн **падает с `PatchError`** до записи манифеста (защита от
-   «манифест говорит patched, а прошивка без канала»).
-8. `LibraryPatcher.patch_mouse_library()` — в `user/libraries/Mouse/src/`:
-   - генерирует `hid_profile.h` (таргетный HID-дескриптор + vendor-коллекция
-     командного канала) и `hid_mapper.h` (дешифровка/шифровка репортов,
-     `decode_input`/`encode_output`);
-   - правит `Mouse.cpp`: инклюды профиля, замена статического дескриптора на
-     `HID_DESCRIPTOR`, переписывание `move()` на
-     `encode_output(state, m) → SendReport(HID_REPORT_ID, m, HID_REPORT_LENGTH)`,
-     расширение кнопок до `uint16_t` (16 кнопок);
-   - правит `Mouse.h`: сигнатура `move(int16_t, int16_t, int16_t, int16_t)` и
-     `uint16_t _buttons`/`uint16_t b`.
-   Смена `--target` регенерирует только `hid_profile.h`/`hid_mapper.h`;
-   правки Mouse.cpp/h маркер-охраняемые и остаются.
-9. `LibraryPatcher.install_hub_command_library()` — копирует
-   `libraries/HubCommand/` (статические исходники в репо) в
-   `user/libraries/HubCommand/` и генерирует туда `mouse_commands.h`.
-10. `LibraryPatcher.write_pc_client_headers()` — пишет `pc_client/target/`
-    (`mouse_commands.h` + `command_channel.h`) — нужны до сборки клиента.
-11. `write_patch_manifest()` — `.build/patches.json`:
-    `{device, target, patched_at, patches: {файл: описание}, generated: {sha256}}`.
-
-**Идемпотентность** достигается маркерами: каждая вставка сначала проверяет
-`if "<маркер>" not in content`. Это позволяет перепатчивать поверх старых
-патчей и менять таргет без «распухания» файлов.
+2. **Валидация профиля** (`core/validation.py: validate_identity`) — до любых
+   записей: ERROR (кавычки/бэкслеш/контрол-символы в строках, пустые строки)
+   ломают `-D` флаги и останавливают patch; WARN (длины >126,
+   VID↔производитель по `KNOWN_VENDORS` — актуально для ручных правок профиля,
+   диапазоны power/ep0/bcdUSB/интервал) логируются и попадают в манифест.
+3. Все правки вычисляются **в памяти** как список `FileEdit`
+   (`build_patch_edits()`); затем либо пишутся атомарно
+   (`apply_edits()`: tmp + `os.replace`), либо печатаются диффом
+   (`--dry-run`, `render_edits_diff()`). Состав правок:
+4. `IdentityPatcher` — identity-паритетность с source-профилем (принцип
+   «всегда явно»: значения пересобираются на каждом patch, даже совпадающие
+   со стоком):
+   - отключение CDC в `USBCore.cpp`;
+   - `boards.txt`: `build.vid/pid`, `usb_product/manufacturer`,
+     `extra_flags` = `{build.usb_flags} -DCDC_DISABLED -DUSB_EP_SIZE=16
+     -DUSB_CONFIG_POWER=<mA> -DUSB_VERSION=0x<bcdUSB>
+     -DUSB_CONFIG_ATTRIBUTES=0x<bmAttributes> -DHID_EP_INTERVAL=0x<bInterval>`;
+     `USB_EP_SIZE=16` — чтобы interrupt-пакеты были по 16 байт
+     (совместимость с hidapi-буфером `[ID][payload]`);
+   - `USBCore.cpp`: в обеих ветках `D_DEVICE(...)` — EP0 maxPacketSize ←
+     устройства, bcdDevice ← устройства, iSerialNumber → 0;
+   - `USBCore.h`: guard `#ifndef USB_CONFIG_ATTRIBUTES` вокруг атрибутов
+     конфигурации в `D_CONFIG` (версия `// HUB_PATCH_VERSION 1`);
+   - `HID.h`: литерал `D_HIDREPORT` переписывается целиком — **оба байта**
+     bcdHID ← устройства + bCountryCode ← устройства;
+   - `HID.cpp`: subclass/protocol интерфейса → boot mouse policy
+     (`HID_SUBCLASS_BOOT_INTERFACE, HID_PROTOCOL_MOUSE`; намеренно не из JSON);
+5. `CommandChannelPatcher.patch_hid_command_core()` (v3) — маркер-охраняемые
+   правки HID.h/HID.cpp командного канала **плюс**: `HID_EP_INTERVAL` define +
+   его использование в обоих `D_ENDPOINT` (IN и interrupt OUT), корректные
+   ответы GET_IDLE/GET_PROTOCOL (`USB_SendControl(0, &idle|&protocol, 1)`)
+   вместо stall/пустого пакета. Если канал включён, а правка не легла —
+   пайплайн падает с `PatchError`.
+6. `write_hid_command_config()` / `write_hid_capability_blob()` — генерация
+   `hid_command_config.h` / `hid_capability_blob.h` в ядро (переписываются
+   на каждом patch — пер-таргетная проводка).
+7. `LibraryPatcher.patch_mouse_library()` — генерирует `hid_profile.h`
+   (таргетный HID-дескриптор + vendor-коллекция канала) и `hid_mapper.h`,
+   маркер-охраняемо правит Mouse.cpp/h. Смена `--target` регенерирует только
+   заголовки.
+8. `install_hub_command_library()` + `write_pc_client_headers()` — копия
+   библиотеки, `mouse_commands.h`, заголовки PC-клиента.
+9. `write_patch_manifest()` — `.build/patches.json`: device/target/время +
+   описание патчей (включая `validation`) + sha256 генератов.
 
 ### 4.4 `compile`
 
@@ -431,7 +427,7 @@ Cmd.poll();   // обработка командного канала из loop(
 |---------|-------|----------|
 | `setup` | `--cli-version`, `--core-version` | Скачать CLI, установить AVR core и библиотеки |
 | `clone` | `--name`, `--report` | Парсинг отчёта → `profiles/sources/<name>.json` |
-| `patch` | `--device`, `--target` (default `generic_3btn`), `--client-out <dir>` | Полный набор правок ядра + генерация заголовков + манифест; `--client-out` экспортирует заголовки PC-клиента во внешний каталог |
+| `patch` | `--device`, `--target` (default `generic_3btn`), `--client-out <dir>`, `--dry-run` | Полный набор правок ядра + генерация заголовков + валидация + манифест; `--client-out` экспортирует заголовки PC-клиента во внешний каталог; `--dry-run` печатает unified diff всех правок и отчёт валидации, ничего не пишет и не скачивает инструментарий (нужен установленный `setup`; код 1 при ERROR-валидации) |
 | `compile` | `--sketch`, `--fqbn` (default `arduino:avr:leonardo`) | Компиляция sketch'а |
 | `flash` | `--device`, `--target`, `--sketch`, `--port`, `--fqbn` | Патч + компиляция + загрузка |
 
@@ -455,6 +451,11 @@ Cmd.poll();   // обработка командного канала из loop(
 | `transport=output` не работает на Linux | Ожидаемо: hid_write без interrupt OUT endpoint не работает. Используйте `feature` |
 | Плавает поведение канала | Проверьте, что `feature`-клиент и прошивка собраны из одного `patch` (и `pc_client/target` перегенерирован) |
 | Смена `--target` ничего не изменила в Mouse.cpp | Это нормально: регенерируются только `hid_profile.h`/`hid_mapper.h`; правки Mouse.cpp/h маркер-охраняемые |
+| В дампе bcdHID = 0x1101 вместо 0x0111 | Ядро пропатчено старой версией патчера (байт в HIGH-позиции). Один свежий `patch` мигрирует литерал (см. docs/plans/enumeration-identity-parity.md §3.1) |
+| patch упал с «validation failed» | Профиль источника сломан вручную: кавычки/бэкслеш в строках или пустые строки. Исправьте JSON — ERROR-поля ломают `-D` компиляции |
+| Хочу посмотреть, что изменит patch | `arduino-hub patch ... --dry-run` — unified diff всех файлов без записи |
+| После flash: Problem 43, «сбой запроса дескриптора конфигурации», device descriptor при этом читается | Ядро патчено версией, декларировавшей EP0 < 64 без синхронных правок аллокации и SendControl (см. ниже) |
+| Устройство полностью исчезает из системы после flash, LED заморожен | Ядро патчено версией с банком EP0=32, но без фикса маски в `SendControl` (`& 0x3F` = каждые 64 байта): байт №33 конфиг-дескриптора пишется в полный FIFO → зависание внутри control-ISR. Свежий `patch` ставит `-DUSB_EP0_MAX_PACKET=N`, `USB_EP0_ALLOC` и замену маски на `% USB_EP0_MAX_PACKET`; перезапустите patch → flash |
 
 ---
 

@@ -13,7 +13,11 @@ from arduino_hub.core.patcher import (
     HID_CPP_MARKER,
     HID_H_MARKER,
     CommandChannelPatcher,
+    IdentityPatcher,
     LibraryPatcher,
+    apply_edits,
+    build_patch_edits,
+    render_edits_diff,
 )
 from arduino_hub.targets import load_target
 from arduino_hub.usbhid.command_schema import load_command_schema
@@ -242,6 +246,10 @@ STOCK_HID_H = """\
 #define HID_REPORT_TYPE_OUTPUT  2
 #define HID_REPORT_TYPE_FEATURE 3
 
+// Wire layout: len, dtype, bcdHID LOW, bcdHID HIGH, country, numDesc,
+// descType, descLen LOW/HIGH.
+#define D_HIDREPORT(length) { 9, 0x21, 0x01, 0x01, 0, 1, 0x22, lowByte(length), highByte(length) }
+
 typedef struct 
 {
   InterfaceDescriptor hid;
@@ -435,6 +443,16 @@ def test_patch_hid_command_core(tmp_path):
     assert "uint8_t scratch[HID_COMMAND_TOTAL_LEN] = {0};" in cpp
     assert "scratch[0] != HID_COMMAND_REPORT_ID" in cpp
     assert "memcpy(dst, scratch + 1, payloadLen);" in cpp
+    # v3 identity parity: bInterval via macro, spec-correct class
+    # request answers (no more empty packet / stall).
+    assert "#ifndef HID_EP_INTERVAL" in cpp
+    assert "#define HID_EP_INTERVAL 0x01" in cpp
+    assert ", USB_EP_SIZE, HID_EP_INTERVAL)" in cpp
+    assert ", USB_EP_SIZE, 0x01)" not in cpp
+    assert "return USB_SendControl(0, &protocol, 1) > 0;" in cpp
+    assert "return USB_SendControl(0, &idle, 1) > 0;" in cpp
+    assert "// TODO: Send8(protocol);" not in cpp
+    assert "// TODO: Send8(idle);" not in cpp
 
 
 def test_patch_hid_command_core_idempotent(tmp_path):
@@ -525,7 +543,7 @@ def test_patch_hid_command_core_upgrades_stale_core(tmp_path):
     CommandChannelPatcher.patch_hid_command_core(tmp_path)
 
     cpp = (hid / "HID.cpp").read_text(encoding="utf-8")
-    assert "// HUB_PATCH_VERSION 2" in cpp
+    assert "// HUB_PATCH_VERSION 3" in cpp
     # Atomic ring read upgraded.
     assert "cli();" in cpp
     assert "sei();" in cpp
@@ -537,6 +555,14 @@ def test_patch_hid_command_core_upgrades_stale_core(tmp_path):
     assert "HID_CAPABILITY_BLOB" in cpp
     assert '#include "hid_capability_blob.h"' in cpp
     assert (hid / "hid_capability_blob.h").exists() is False  # written by caller
+    # v3: interval macro + spec-correct class request answers applied
+    # to the stale (v2-era) content too — including the already-present
+    # OUT endpoint descriptor line.
+    assert "#ifndef HID_EP_INTERVAL" in cpp
+    assert ", USB_EP_SIZE, HID_EP_INTERVAL)" in cpp
+    assert ", USB_EP_SIZE, 0x01)" not in cpp
+    assert "return USB_SendControl(0, &protocol, 1) > 0;" in cpp
+    assert "return USB_SendControl(0, &idle, 1) > 0;" in cpp
 
     h = (hid / "HID.h").read_text(encoding="utf-8")
     assert "// HUB_PATCH_VERSION 2" in h
@@ -573,3 +599,316 @@ def test_install_hub_command_library_and_pc_headers(tmp_path):
     assert "#define HID_COMMAND_TRANSPORT 3" in channel
     assert "#define HID_COMMAND_TRANSPORT_INTERRUPT_OUT 3" in channel
     assert "#define HID_COMMAND_USAGE_PAGE 0xFF00" in channel
+
+# ── Identity parity transforms (enumeration-identity-parity plan) ──
+
+STOCK_USBCORE_CPP = """\
+#define EP_SINGLE_64 0x32\t// EP0
+#define EP_DOUBLE_64 0x36\t// Other endpoints
+#define EP_SINGLE_16 0x12
+
+static int _cmark;
+static int _cend;
+static bool SendControl(u8 d)
+{
+\tif (_cmark < _cend)
+\t{
+\t\tif (!WaitForINOrOUT())
+\t\t\treturn false;
+\t\tSend8(d);
+\t\tif (!((_cmark + 1) & 0x3F))
+\t\t\tClearIN();\t// Fifo is full, release this packet
+\t}
+\t_cmark++;
+\treturn true;
+}
+
+static void core_init(void)
+{
+\tInitEP(0,EP_TYPE_CONTROL,EP_SINGLE_64);\t// init ep0
+}
+
+#ifdef CDC_ENABLED
+const DeviceDescriptor USB_DeviceDescriptorIAD =
+\tD_DEVICE(0xEF,0x02,0x01,64,USB_VID,USB_PID,0x100,IMANUFACTURER,IPRODUCT,ISERIAL,1);
+#else // CDC_DISABLED
+const DeviceDescriptor USB_DeviceDescriptorIAD =
+\tD_DEVICE(0x00,0x00,0x00,64,USB_VID,USB_PID,0x100,IMANUFACTURER,IPRODUCT,ISERIAL,1);
+#endif
+"""
+
+# Form produced by the pre-parity patcher (EP0 untouched everywhere,
+# bcdDevice set).
+OLD_PATCHED_USBCORE_CPP = """\
+#define EP_SINGLE_64 0x32\t// EP0
+#define EP_DOUBLE_64 0x36\t// Other endpoints
+#define EP_SINGLE_16 0x12
+
+static bool SendControl(u8 d)
+{
+\tif (!((_cmark + 1) & 0x3F))
+\t\tClearIN();
+}
+
+static void core_init(void)
+{
+\tInitEP(0,EP_TYPE_CONTROL,EP_SINGLE_64);\t// init ep0
+}
+\tD_DEVICE(0xEF,0x02,0x01,64,USB_VID,USB_PID,0x4401,IMANUFACTURER,IPRODUCT,0,1);
+\tD_DEVICE(0x00,0x00,0x00,64,USB_VID,USB_PID,0x4401,IMANUFACTURER,IPRODUCT,0,1);
+"""
+
+STOCK_USBCORE_H = """\
+#define USB_CONFIG_BUS_POWERED                 0x80
+#define USB_CONFIG_SELF_POWERED                0xC0
+#define USB_CONFIG_REMOTE_WAKEUP               0x20
+
+#ifndef USB_VERSION
+#define USB_VERSION 0x200
+#endif
+
+#define D_DEVICE(_class,_subClass,_proto,_packetSize0,_vid,_pid,_version,_im,_ip,_is,_configs) \\
+\t{ 18, 1, USB_VERSION, _class,_subClass,_proto,_packetSize0,_vid,_pid,_version,_im,_ip,_is,_configs }
+
+#define D_CONFIG(_totalLength,_interfaces) \\
+\t{ 9, 2, _totalLength,_interfaces, 1, 0, USB_CONFIG_BUS_POWERED | USB_CONFIG_REMOTE_WAKEUP, USB_CONFIG_POWER_MA(USB_CONFIG_POWER) }
+"""
+
+STOCK_BOARDS_TXT = """\
+leonardo.name=Arduino Leonardo
+leonardo.build.vid=0x2341
+leonardo.build.pid=0x8036
+leonardo.build.usb_product="Arduino Leonardo"
+leonardo.build.extra_flags={build.usb_flags} -DCDC_DISABLED
+"""
+
+STOCK_D_HIDREPORT = (
+    "#define D_HIDREPORT(length) "
+    "{ 9, 0x21, 0x01, 0x01, 0, 1, 0x22, lowByte(length), highByte(length) }\n"
+)
+
+# What the pre-parity patcher produced: low byte written into the HIGH
+# bcdHID position (wire value 0x1101 instead of 0x0111).
+OLD_PATCHED_D_HIDREPORT = (
+    "#define D_HIDREPORT(length) "
+    "{ 9, 0x21, 0x01, 0x11, 0, 1, 0x22, lowByte(length), highByte(length) }\n"
+)
+
+
+def _identity_device(**overrides):
+    from arduino_hub.usbhid.device_info import DeviceInfo
+
+    fields = dict(
+        name="generic_mouse",
+        vendor_id=0x1234,
+        product_id=0x5678,
+        manufacturer_string="Acme",
+        product_string="Universal Mouse",
+        bcd_device=0x0201,
+        usb_version=0x0200,
+        ep0_max_packet_size=32,
+        bm_attributes=0xA0,
+        max_power_ma=98,
+        bcd_hid=0x0111,
+        country_code=0x00,
+        ep_interval_ms=4,
+        report_id=2,
+        report_length=9,
+        button_count=16,
+    )
+    fields.update(overrides)
+    return DeviceInfo(**fields)
+
+
+def test_usbcore_descriptor_patches_ep0_bcd_serial():
+    device = _identity_device()
+    out = IdentityPatcher._usbcore_descriptor_content(STOCK_USBCORE_CPP, device)
+    expected = ",32,USB_VID,USB_PID,0x201,IMANUFACTURER,IPRODUCT,0,1)"
+    assert out.count(expected) == 2  # both D_DEVICE branches
+    assert "ISERIAL" not in out
+
+    # EP0 hardware allocation routed through the overridable macro and
+    # backed by the new bank-size constants.
+    assert "#ifndef USB_EP0_MAX_PACKET" in out
+    assert "#define EP_SINGLE_8 0x02" in out
+    assert "#define EP_SINGLE_32 0x22" in out
+    assert "InitEP(0,EP_TYPE_CONTROL,USB_EP0_ALLOC)" in out
+    assert "InitEP(0,EP_TYPE_CONTROL,EP_SINGLE_64)" not in out
+
+    # SendControl: bank-full release follows the configured size, not
+    # the stock hardcoded 64-byte mask (root cause of the invisible
+    # device with EP0=32).
+    assert "if (!((_cmark + 1) % USB_EP0_MAX_PACKET))" in out
+    assert "(_cmark + 1) & 0x3F" not in out
+
+    # Idempotent.
+    assert IdentityPatcher._usbcore_descriptor_content(out, device) == out
+
+
+def test_usbcore_descriptor_migrates_old_patch_form():
+    """Old-patched cores declare a custom bcdDevice but still run EP0
+    from the 64-byte bank; the transform must fill in both halves."""
+    device = _identity_device(bcd_device=0x4401, ep0_max_packet_size=8)
+    out = IdentityPatcher._usbcore_descriptor_content(OLD_PATCHED_USBCORE_CPP, device)
+    assert out.count(",8,USB_VID,USB_PID,0x4401,IMANUFACTURER,IPRODUCT,0,1)") == 2
+    assert "InitEP(0,EP_TYPE_CONTROL,USB_EP0_ALLOC)" in out
+    assert "USB_EP0_MAX_PACKET" in out
+    assert "(_cmark + 1) % USB_EP0_MAX_PACKET" in out
+
+
+def test_usbcore_ep0_alloc_idempotent_after_descriptor():
+    """A core whose D_DEVICE is already at target values (e.g. patched
+    by the buggy pre-fix build that declared EP0=32 without touching the
+    hardware bank) must still get the USB_EP0_ALLOC fix."""
+    device = _identity_device(bcd_device=0x4401, ep0_max_packet_size=32)
+    broken = STOCK_USBCORE_CPP.replace("0x100", "0x4401").replace(
+        ",64,USB_VID", ",32,USB_VID"
+    ).replace("ISERIAL,1)", "0,1)")
+    out = IdentityPatcher._usbcore_descriptor_content(broken, device)
+    assert "InitEP(0,EP_TYPE_CONTROL,USB_EP0_ALLOC)" in out
+    assert "(_cmark + 1) % USB_EP0_MAX_PACKET" in out
+    assert IdentityPatcher._usbcore_descriptor_content(out, device) == out
+
+
+def test_usbcore_descriptor_unexpected_form_raises():
+    import pytest
+    from arduino_hub.exceptions import PatchError
+
+    with pytest.raises(PatchError):
+        IdentityPatcher._usbcore_descriptor_content("D_DEVICE(broken);", _identity_device())
+
+
+def test_hid_h_identity_writes_both_bcd_bytes_and_country():
+    out = IdentityPatcher._hid_h_identity_content(
+        STOCK_D_HIDREPORT, _identity_device(bcd_hid=0x0111, country_code=0x00)
+    )
+    # Wire layout: { len, dtype, LOW, HIGH, country, numDesc, ... }
+    assert "{ 9, 0x21, 0x11, 0x01, 0x00, 1, 0x22," in out
+    assert IdentityPatcher._hid_h_identity_content(out, _identity_device()) == out
+
+
+def test_hid_h_identity_migrates_old_high_byte_patch():
+    """The pre-parity patcher put the low byte into the HIGH position
+    (wire 0x1101). The transform must migrate that form."""
+    out = IdentityPatcher._hid_h_identity_content(
+        OLD_PATCHED_D_HIDREPORT, _identity_device(bcd_hid=0x021A, country_code=0x05)
+    )
+    assert "{ 9, 0x21, 0x1A, 0x02, 0x05, 1, 0x22," in out
+
+
+def test_usbc_h_attributes_guard():
+    out = IdentityPatcher._usbc_h_attributes_content(STOCK_USBCORE_H)
+    assert "#ifndef USB_CONFIG_ATTRIBUTES" in out
+    assert "// HUB_PATCH_VERSION 1" in out
+    assert (
+        "#define USB_CONFIG_ATTRIBUTES (USB_CONFIG_BUS_POWERED | USB_CONFIG_REMOTE_WAKEUP)" in out
+    )
+    assert "USB_CONFIG_ATTRIBUTES, USB_CONFIG_POWER_MA(USB_CONFIG_POWER)" in out
+    # Only inside the guard default, not in D_CONFIG anymore.
+    body = out.split("#endif")[-1]
+    assert "USB_CONFIG_BUS_POWERED | USB_CONFIG_REMOTE_WAKEUP" not in body
+
+    # Idempotent.
+    assert IdentityPatcher._usbc_h_attributes_content(out) == out
+
+
+def test_boards_txt_carries_all_identity_flags():
+    content = IdentityPatcher._boards_txt_content(STOCK_BOARDS_TXT, _identity_device())
+    line = next(l for l in content.splitlines() if l.startswith("leonardo.build.extra_flags"))
+    for flag in (
+        "-DCDC_DISABLED",
+        "-DUSB_EP_SIZE=16",
+        "-DUSB_CONFIG_POWER=98",
+        "-DUSB_VERSION=0x0200",
+        "-DUSB_CONFIG_ATTRIBUTES=0xA0",
+        "-DHID_EP_INTERVAL=0x04",
+        "-DUSB_EP0_MAX_PACKET=32",
+    ):
+        assert flag in line, flag
+    assert 'leonardo.build.vid=0x1234' in content
+    assert 'leonardo.build.pid=0x5678' in content
+
+    # Always-explicit: re-running with a changed interval updates flags
+    # even though VID/PID are unchanged (no early return).
+    updated = IdentityPatcher._boards_txt_content(content, _identity_device(ep_interval_ms=8))
+    assert "-DHID_EP_INTERVAL=0x08" in updated
+
+
+def test_build_patch_edits_apply_and_dry_run(tmp_path):
+    """Full edit computation on a synthetic install; apply once -> all
+    written; compute again -> nothing changed. render_edits_diff shows
+    every change without touching the disk."""
+    import shutil
+
+    from arduino_hub.core.patcher import MOUSE_LIB_RELATIVE
+
+    base = tmp_path
+    core = base / "arduino-cli-data" / "packages" / "arduino" / "hardware" / "avr" / "1.8.6"
+    hid_src = core / "libraries" / "HID" / "src"
+    hid_src.mkdir(parents=True)
+    (core / "cores" / "arduino").mkdir(parents=True)
+    (hid_src / "HID.h").write_text(STOCK_HID_H, encoding="utf-8")
+    (hid_src / "HID.cpp").write_text(STOCK_HID_CPP, encoding="utf-8")
+    (core / "cores" / "arduino" / "USBCore.cpp").write_text(STOCK_USBCORE_CPP, encoding="utf-8")
+    (core / "cores" / "arduino" / "USBCore.h").write_text(STOCK_USBCORE_H, encoding="utf-8")
+    (core / "boards.txt").write_text(STOCK_BOARDS_TXT, encoding="utf-8")
+
+    lib_src = base / MOUSE_LIB_RELATIVE
+    lib_src.mkdir(parents=True)
+    (lib_src / "Mouse.h").write_text(STOCK_MOUSE_H, encoding="utf-8")
+    (lib_src / "Mouse.cpp").write_text(STOCK_MOUSE_CPP, encoding="utf-8")
+
+    shutil.copytree(
+        REPO_ROOT / "libraries" / "HubCommand", base / "libraries" / "HubCommand"
+    )
+
+    from arduino_hub.core.validation import validate_identity
+
+    device = load_g305()
+    target = load_target("generic_5btn", REPO_ROOT)
+    schema = load_command_schema(REPO_ROOT)
+
+    issues = validate_identity(device)
+    assert not [i for i in issues if i.severity == "ERROR"]
+
+    edits = build_patch_edits(base, core, device, target, schema)
+    paths = {e.path.name for e in edits}
+    assert {
+        "boards.txt", "USBCore.cpp", "USBCore.h", "HID.h", "HID.cpp",
+        "hid_command_config.h", "hid_capability_blob.h",
+        "hid_profile.h", "hid_mapper.h", "Mouse.cpp", "Mouse.h",
+        "MouseCommandHandler.cpp", "mouse_commands.h", "command_channel.h",
+    } <= paths
+    assert all(e.changed for e in edits)
+
+    diff = render_edits_diff(edits)
+    assert "boards.txt" in diff
+    assert "-DUSB_CONFIG_ATTRIBUTES=0xA0" in diff
+    assert "-DUSB_VERSION=0x0200" in diff
+    assert "-DUSB_EP0_MAX_PACKET=32" in diff
+    assert "+\tD_DEVICE(0x00,0x00,0x00,32,USB_VID,USB_PID,0x4401,IMANUFACTURER,IPRODUCT,0,1);" in diff
+    assert "InitEP(0,EP_TYPE_CONTROL,USB_EP0_ALLOC);" in diff
+    assert "+\t\tif (!((_cmark + 1) % USB_EP0_MAX_PACKET))" in diff
+    assert "-\t\tif (!((_cmark + 1) & 0x3F))" in diff
+
+    assert apply_edits(edits) == len(edits)
+
+    # Second computation over the patched tree: everything up to date.
+    edits2 = build_patch_edits(base, core, device, target, schema)
+    unchanged = [e for e in edits2 if not e.changed]
+    assert len(unchanged) == len(edits2), [e.path for e in edits2 if e.changed]
+    assert render_edits_diff(edits2) == ""
+
+    # No stray temp files left behind by atomic writes.
+    strays = [p for p in base.rglob("*.tmp")]
+    assert strays == []
+
+    # Sanity on key patched artifacts.
+    usbcpp = (core / "cores" / "arduino" / "USBCore.cpp").read_text(encoding="utf-8")
+    assert ",32,USB_VID,USB_PID,0x4401,IMANUFACTURER,IPRODUCT,0,1)" in usbcpp
+    assert "InitEP(0,EP_TYPE_CONTROL,USB_EP0_ALLOC)" in usbcpp
+    assert "#define USB_EP0_ALLOC EP_SINGLE_32" in usbcpp
+    assert "(_cmark + 1) % USB_EP0_MAX_PACKET" in usbcpp
+    assert "& 0x3F" not in usbcpp
+    hid_h = (hid_src / "HID.h").read_text(encoding="utf-8")
+    assert "{ 9, 0x21, 0x11, 0x01, 0x00, 1, 0x22," in hid_h

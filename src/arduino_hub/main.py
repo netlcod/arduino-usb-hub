@@ -71,6 +71,12 @@ def main() -> None:
         help="Optional directory to export the generated PC client headers "
         "(mouse_commands.h, command_channel.h), e.g. another repository",
     )
+    p_patch.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the diffs that would be applied and exit without writing "
+        "any file (also prints the validation report)",
+    )
     _add_global_opts(p_patch)
 
     p_compile = sub.add_parser("compile", help="Compile sketch")
@@ -125,6 +131,7 @@ def main() -> None:
                 args.cli_version,
                 args.core_version,
                 client_out=args.client_out,
+                dry_run=args.dry_run,
             )
         elif args.command == "compile":
             cmd_compile(

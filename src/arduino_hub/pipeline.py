@@ -6,17 +6,17 @@ from pathlib import Path
 from arduino_hub.cli.manager import ArduinoCLIManager
 from arduino_hub.core.installer import ArduinoCoreInstaller
 from arduino_hub.core.patcher import (
-    MOUSE_LIB_RELATIVE,
     PC_CLIENT_TARGET_DIR,
-    CommandChannelPatcher,
-    IdentityPatcher,
-    LibraryPatcher,
+    apply_edits,
+    build_manifest_patches,
+    build_patch_edits,
+    render_edits_diff,
     write_patch_manifest,
 )
+from arduino_hub.core.validation import has_errors, summarize, validate_identity
 from arduino_hub.devices import load as load_device, save as save_device
 from arduino_hub.exceptions import PatchError
 from arduino_hub.targets import load_target
-from arduino_hub.usbhid.command_generator import CMD_PAYLOAD_LEN
 from arduino_hub.usbhid.command_schema import load_command_schema
 from arduino_hub.usbhid.descriptor_reader import parse_report
 from arduino_hub.usbhid.hid_generator import source_layout_warnings
@@ -100,68 +100,56 @@ def _patch_for_device(
     target_name: str,
     core_path: Path,
     client_out: Path | None = None,
+    dry_run: bool = False,
 ) -> None:
     device = load_device(device_name, base_dir)
     target = load_target(target_name, base_dir)
     schema = load_command_schema(base_dir)
 
-    IdentityPatcher.patch_usb_core(core_path)
-    IdentityPatcher.patch_boards_txt(core_path, device)
-    IdentityPatcher.patch_usbcore(core_path, device)
-    IdentityPatcher.patch_hid(core_path, device)
+    # Pre-flight: refuse to touch the core on hard profile errors.
+    issues = validate_identity(device)
+    for issue in issues:
+        logger.warning("validation %s", issue)
+    if has_errors(issues):
+        raise PatchError(
+            "Profile validation failed:\n"
+            + "\n".join(f"  - {i}" for i in issues if i.severity == "ERROR")
+        )
 
-    CommandChannelPatcher.write_hid_command_config(core_path, target, schema)
-    CommandChannelPatcher.write_hid_capability_blob(core_path, target, schema)
-    CommandChannelPatcher.patch_hid_command_core(core_path)
+    layout_warnings = source_layout_warnings(device)
+    if layout_warnings:
+        logger.warning("source layout: %s", "; ".join(layout_warnings))
+
+    edits = build_patch_edits(base_dir, core_path, device, target, schema)
+
+    if dry_run:
+        diff = render_edits_diff(edits)
+        logger.info("=== Dry run: no files were modified ===")
+        logger.info("Validation: %s", summarize(issues))
+        if diff:
+            logger.info("%s", diff)
+        else:
+            logger.info("No file changes required — everything already up to date.")
+        return
+
+    apply_edits(edits)
 
     if target.command.enabled:
-        hid_cpp = core_path / "libraries" / "HID" / "src" / "HID.cpp"
-        if not hid_cpp.exists() or "readReportPacket" not in hid_cpp.read_text(
-            encoding="utf-8"
-        ):
+        hid_edit = next(
+            (e for e in edits if e.path.name == "HID.cpp"), None
+        )
+        if hid_edit is None or "readReportPacket" not in hid_edit.updated:
             raise PatchError(
                 f"Command channel patch did not apply: HID library not found "
-                f"at {hid_cpp}. Fix the core install before flashing, "
-                f"otherwise the device flashes without a command channel."
+                f"at {core_path / 'libraries' / 'HID' / 'src'}. Fix the core "
+                f"install before flashing, otherwise the device flashes "
+                f"without a command channel."
             )
 
-    lib_path = base_dir / MOUSE_LIB_RELATIVE
-    LibraryPatcher.patch_mouse_library(lib_path, device, target)
+    patches = build_manifest_patches(device, target, client_out, layout_warnings, issues)
 
-    LibraryPatcher.install_hub_command_library(base_dir, schema)
-    LibraryPatcher.write_pc_client_headers(base_dir, target, schema)
-
-    command_desc = ""
-    if target.command.enabled:
-        command_desc = (
-            f"transport={target.command.transport}, "
-            f"slots={target.command.queue_slots}, "
-            f"payload={CMD_PAYLOAD_LEN}"
-        )
-    else:
-        command_desc = "disabled"
-
-    patches = {
-        "boards.txt": f"VID/PID {device.vendor_id:04X}:{device.product_id:04X}, "
-                      f"strings, CDC_DISABLED, USB_EP_SIZE=16, "
-                      f"USB_CONFIG_POWER={device.max_power_ma}",
-        "USBCore.cpp": f"bcdDevice 0x{device.bcd_device:X}, iSerialNumber 0",
-        "HID.h": f"bcdHID 0x{device.bcd_hid:X}",
-        "HID.cpp": "subclass 1 / protocol 2 (boot mouse policy)",
-        "Mouse.cpp": "includes + move() decode->encode->SendReport",
-        "Mouse.h": "move(int16_t x, int16_t y, int16_t wheel, int16_t pan), uint16_t buttons",
-        "hid_command_config.h": command_desc,
-        "hid_capability_blob.h": "generated capability payload (HID_CAPABILITY_BLOB)",
-        "HID.cpp/HID.h command": "SET_REPORT(Output|Feature) ring buffer, GET_REPORT(Feature)",
-        "HubCommand": "MouseCommandHandler + transports",
-        "pc_client/target": "mouse_commands.h + command_channel.h",
-    }
     if client_out is not None:
         _export_client_headers(base_dir, client_out)
-        patches["client export"] = str(client_out)
-    warnings = source_layout_warnings(device)
-    if warnings:
-        patches["source layout"] = "; ".join(warnings)
 
     write_patch_manifest(base_dir, device_name, target_name, patches)
 
@@ -173,8 +161,23 @@ def cmd_patch(
     cli_version: str,
     core_version: str,
     client_out: Path | None = None,
+    dry_run: bool = False,
 ) -> None:
     logger.info("=== Step: Patch for device '%s', target '%s' ===", device_name, target_name)
+
+    if dry_run:
+        # Preview only: no toolchain downloads or installs. Requires an
+        # environment prepared by 'arduino-hub setup'.
+        core_path = ArduinoCoreInstaller.find_path(base_dir, core_version)
+        if core_path is None:
+            raise PatchError(
+                f"AVR core {core_version} not found. Run 'arduino-hub setup' "
+                f"first."
+            )
+        _patch_for_device(
+            base_dir, device_name, target_name, core_path, client_out, True
+        )
+        return
 
     mgr = ArduinoCLIManager(base_dir, cli_version)
     executor = mgr.ensure_cli()
@@ -182,7 +185,9 @@ def cmd_patch(
     installer = ArduinoCoreInstaller(executor, base_dir)
     core_path = installer.ensure_version(core_version)
 
-    _patch_for_device(base_dir, device_name, target_name, core_path, client_out)
+    _patch_for_device(
+        base_dir, device_name, target_name, core_path, client_out, False
+    )
 
     logger.info("Patch complete for '%s' (target '%s').", device_name, target_name)
 
