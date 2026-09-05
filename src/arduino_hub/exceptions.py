@@ -51,14 +51,6 @@ class CommandSchemaError(ArduinoHubError):
     """Command protocol schema is invalid or not found."""
 
 
-class DeviceCloneError(ArduinoHubError):
-    """Failed to clone HID device info."""
-
-
-class NoHIDDevicesError(ArduinoHubError):
-    """No HID devices found."""
-
-
 class BuildError(ArduinoHubError):
     """Compilation or upload failed."""
 

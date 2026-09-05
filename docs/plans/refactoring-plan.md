@@ -258,7 +258,7 @@ wire-порядок определяется только эмпирически
 | R3 | B | `hid_capability_blob.h` (единый источник truth capability) |
 | R4 | B | Generated wire-format определения команд |
 | R6 | B | Разбиение USBPatcher — последним |
-| — | C | `enumerator.py`, legacy-формат, неиспользуемые exceptions — не трогать |
+| — | C | `enumerator.py`, `arduino_spoof.py`, legacy-формат, `DeviceCloneError`/`NoHIDDevicesError` — удалены (чистка 2026-09) |
 | — | D | Генерация handler'ов/поведения, runtime HID-парсер, универсальный ReportState — не делать |
 
 ## Future-proofing

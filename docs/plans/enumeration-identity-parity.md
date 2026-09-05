@@ -1,6 +1,6 @@
 # План: Enumeration Identity Parity + валидация профиля + dry-run
 
-Статус: утверждён к реализации.
+Статус: внедрён (коммит fc46dab: IdentityPatcher A–J, validation.py, dry-run, атомарные записи, манифест).
 Связанные документы: `docs/plans/hid-clone-architecture.md` (архитектура),
 `docs/device-clone-plan.md` (исходный анализ параметров),
 `docs/usb-stack-audit.md` (аудит ядра 1.8.6).

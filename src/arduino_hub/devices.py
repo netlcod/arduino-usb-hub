@@ -172,19 +172,6 @@ def _from_dict(data: dict) -> DeviceInfo:
     )
 
 
-def _from_legacy_dict(data: dict) -> DeviceInfo:
-    """Reconstruct a DeviceInfo from the old minimal format."""
-    return DeviceInfo(
-        name=data.get("name", ""),
-        vendor_id=int(data["vendor_id"], 16),
-        product_id=int(data["product_id"], 16),
-        manufacturer_string=data.get("manufacturer_string", ""),
-        product_string=data.get("product_string", ""),
-        serial_number=data.get("serial_number"),
-        path=b"",
-    )
-
-
 def save(device: DeviceInfo, name: str, base_dir: Path) -> Path:
     dir_path = _devices_dir(base_dir)
     dir_path.mkdir(parents=True, exist_ok=True)
@@ -218,9 +205,13 @@ def load(name: str, base_dir: Path) -> DeviceInfo:
     file_path = matches[0]
     data = json.loads(file_path.read_text(encoding="utf-8"))
 
-    if "hid_report_descriptors" in data:
-        return _from_dict(data)
-    return _from_legacy_dict(data)
+    if "hid_report_descriptors" not in data:
+        raise DeviceNotFoundError(
+            f"Device '{name}' profile is in the old minimal format "
+            f"(no 'hid_report_descriptors'). Re-run "
+            f"'arduino-hub clone --name {name} --report <path>' to regenerate."
+        )
+    return _from_dict(data)
 
 
 def list_devices(base_dir: Path) -> list[str]:

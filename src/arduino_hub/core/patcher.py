@@ -60,8 +60,11 @@ _HID_CAPABILITY_BLOB_NAME = "hid_capability_blob.h"
 # v3: identity parity additions — HID_EP_INTERVAL macro in D_ENDPOINT,
 # spec-correct GET_IDLE/GET_PROTOCOL answers (USB_SendControl instead
 # of TODO stubs).
+# v4: SendReport ships id+payload as a single USB packet (stock sent
+# two back-to-back packets, doubling latency and breaking hosts that
+# expect one IN transaction per report).
 HID_H_PATCH_VERSION = 2
-HID_CPP_PATCH_VERSION = 3
+HID_CPP_PATCH_VERSION = 4
 USBCORE_H_MARKER = "#ifndef USB_CONFIG_ATTRIBUTES"
 USBCORE_H_VERSION_MARKER = "// HUB_PATCH_VERSION 1"
 _PATCH_VERSION_RE = re.compile(r"// HUB_PATCH_VERSION (\d+)")
@@ -403,7 +406,24 @@ class IdentityPatcher:
             content = updated
             logger.debug("USBCore.cpp: %d D_DEVICE occurrence(s) rewritten", count)
 
+        content = IdentityPatcher._usbcore_get_config_content(content)
         return IdentityPatcher._usbcore_ep0_alloc_content(content)
+
+    @staticmethod
+    def _usbcore_get_config_content(content: str) -> str:
+        """Answer GET_CONFIGURATION with the live configuration value.
+
+        Stock always returns 1, even before SET_CONFIGURATION (spec
+        requires 0 while unconfigured). One-line, idempotent.
+        """
+        fixed = "Send8(_usbConfiguration);"
+        if fixed in content:
+            return content
+        stock = "Send8(1);"
+        if stock in content:
+            content = content.replace(stock, fixed, 1)
+            logger.debug("USBCore.cpp: GET_CONFIGURATION returns live value")
+        return content
 
     @staticmethod
     def patch_usbcore(core_path: Path, device: DeviceInfo) -> None:
@@ -982,6 +1002,37 @@ class CommandChannelPatcher:
             if old in content:
                 content = content.replace(old, new, 1)
                 logger.info("HID.cpp: SET_REPORT slot zero-padding added")
+
+        # SendReport: stock ships the report id and the payload as two
+        # back-to-back USB packets (2 IN transactions per HID report).
+        # Collapse into a single packet: id followed by payload, one
+        # TRANSFER_RELEASE. Matches both the pristine stock form and
+        # cores already carrying other HUB edits (idempotent: the new
+        # single-send body no longer contains the old pattern).
+        _SENDREPORT_OLD = (
+            "int HID_::SendReport(uint8_t id, const void* data, int len)\n"
+            "{\n"
+            "\tauto ret = USB_Send(pluggedEndpoint, &id, 1);\n"
+            "\tif (ret < 0) return ret;\n"
+            "\tauto ret2 = USB_Send(pluggedEndpoint | TRANSFER_RELEASE, data, len);\n"
+            "\tif (ret2 < 0) return ret2;\n"
+            "\treturn ret + ret2;\n"
+            "}\n"
+        )
+        _SENDREPORT_NEW = (
+            "int HID_::SendReport(uint8_t id, const void* data, int len)\n"
+            "{\n"
+            "\t// Single USB packet: report id followed by the payload.\n"
+            "\t// (Stock sent id and data as two packets; hosts expect one.)\n"
+            "\tuint8_t buf[len + 1];\n"
+            "\tbuf[0] = id;\n"
+            "\tmemcpy(buf + 1, data, len);\n"
+            "\treturn USB_Send(pluggedEndpoint | TRANSFER_RELEASE, buf, len + 1);\n"
+            "}\n"
+        )
+        if _SENDREPORT_OLD in content:
+            content = content.replace(_SENDREPORT_OLD, _SENDREPORT_NEW, 1)
+            logger.info("HID.cpp: SendReport collapsed to a single USB packet")
 
         # Capability: macro-based blob → generated hid_capability_blob.h.
         if "_capabilityReport[] PROGMEM" in content:

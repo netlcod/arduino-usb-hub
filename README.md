@@ -408,6 +408,20 @@ port** to the host — it becomes a pure HID clone. To upload new firmware:
 
 The bootloader will create a temporary COM port during those few seconds.
 
+## Production checklist
+
+Before the final `flash`:
+
+1. `HUB_CMD_MARKER` in `libraries/HubCommand/src/MouseCommandHandler.cpp` is `0`
+   (LED-blink diagnostics off).
+2. `HUB_DEBUG_DUMP` in `examples/mouse/hidmouserptparser.h` is `0` (raw-report
+   Serial dump off — it also needs CDC, which the patched build disables).
+3. The firmware and the PC client come from the same `patch` run (re-patch →
+   re-flash → rebuild client after editing `profiles/targets/*.json` or
+   `profiles/protocol/mouse.json`).
+4. `.build/patches.json` shows no unexpected `validation` or `source layout`
+   warnings.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |

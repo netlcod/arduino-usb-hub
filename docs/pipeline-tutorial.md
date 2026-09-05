@@ -483,7 +483,6 @@ src/arduino_hub/
     command_schema.py — CommandSchema/CommandDef/CommandArg + load (валидация, типы)
     command_generator.py — командный дескриптор, hid_command_config.h,
                            mouse_commands.h, capability-блоб (константы протокола)
-    enumerator.py    — HIDEnumerator (legacy, пайплайном не используется)
 ```
 
 Пайплайн работает с **файлами ядра на диске** (никакого покомпиляционного

@@ -80,7 +80,6 @@ src/arduino_hub/
                        (opcodes + wire-format OFF/SIZE/LEN macros, file name
                        from schema name), generate_capability_blob() +
                        generate_hid_capability_blob_h()
-    enumerator.py    — HIDEnumerator (legacy, unused by pipeline)
 profiles/
   sources/g305.json   — cloned source profile (gitignored, user data)
   targets/            — generic_3btn / generic_5btn / generic_16btn (see below)
@@ -173,6 +172,8 @@ Patch state is recorded in `.build/patches.json`.
 - **`D_HIDREPORT` в HID.h следует wire-layout спеки, а не соседней структуре**: байт 2 = bcdHID LOW, байт 3 = HIGH, байт 4 = country (структура `HIDDescDescriptor` с полем `addr` вводит в заблуждение). Патчер пишет оба байта bcdHID + country; старые ядра с патчем «только младший байт» (на проводе было 0x1101 вместо 0x0111) мигрируются автоматически.
 - **USBCore.h теперь тоже патчится** (`#ifndef USB_CONFIG_ATTRIBUTES` guard, версия `// HUB_PATCH_VERSION 1`): повторный `setup` (перезакачка core) откатывает все правки ядра — штатный путь отката.
 - **GET_IDLE/GET_PROTOCOL отвечают данными** (`USB_SendControl(0, &idle|&protocol, 1)`, v3 патча): до этого GET_IDLE ставился в stall, GET_PROTOCOL возвращал пустой пакет.
+- **SendReport одним пакетом** (v4 патча): сток слал id и payload двумя IN-транзакциями; патчер собирает `buf[len+1]` и шлёт одним `USB_Send(…|TRANSFER_RELEASE,…)`.
+- **GET_CONFIGURATION отвечает живым значением** (`Send8(_usbConfiguration)` вместо стокового `Send8(1)`): патчится в `USBCore.cpp` вместе с дескриптором.
 - **AVR core path discovery**: uses `find_path()` which scans `arduino-cli-data/packages/arduino/hardware/avr/` for the requested version. No hardcoded path.
 - **Arduino CLI binary is auto-downloaded**: to `.build/tools/` (gitignored). Checks if binary exists before downloading. Windows only.
 - **Name conflict with hidapi**: imported as `usbhid/` internally to avoid collision with the `hid` module from hidapi.

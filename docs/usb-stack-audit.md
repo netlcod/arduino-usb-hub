@@ -212,13 +212,14 @@ typedef struct {
 |------|----------|-------------|
 | `len` | 9 | Фиксировано HID 1.11 |
 | `dtype` | `0x21` | `HID_HID_DESCRIPTOR_TYPE` |
-| `addr` | `0x01` | Версия HID 1.01 (`bcdHID = 0x0101`) |
-| `country` | `1` | **Код страны — всегда 1 (US)!** Жёстко в макросе. |
+| bcdHID low | `0x01` | Младший байт bcdHID = 1.01 (макрос идёт по wire-layout спеки HID §6.2.1 — поля `addr` из соседней C-структуры на проводе нет) |
+| bcdHID high | `0x01` | Старший байт bcdHID |
+| country | `0` | **На проводе 0 (not localized)** — литерал `{ …, 0x01, 0x01, 0, 1, 0x22 … }`: пятый элемент это country = 0, шестой — bNumDescriptors = 1. Ранняя версия этого аудита ошибочно читала country = 1 (US) по C-структуре |
 | `desctype` | `0x22` | Следующий дескриптор — Report |
 | `descLen` | `descriptorSize` | Динамический (сумма длин всех HIDSubDescriptor) |
 
-**Проблема с Country Code = 1:**
-Для локализованных клавиатур нужен 0 (Not localized) или конкретный код. Для мыши это не критично, но для клавиатур может влиять на раскладку.
+**Проблема с Country Code:**
+Сток отдаёт 0 (not localized) — совпадает с большинством мышей (включая G305). Патчер перезаписывает оба байта bcdHID + country из профиля (`IdentityPatcher`, см. план enumeration-identity-parity §3.1).
 
 **bcdHID = 1.01:** Это HID 1.01, что несколько устарело. Современное значение — 1.11 (`0x0111`). **Нельзя изменить без патча макроса или HID.cpp.**
 
@@ -874,29 +875,29 @@ int HID_::SendReport(uint8_t id, const void* data, int len) {
 | **Language ID** | `USBCore.cpp:39-42` | Да (патч массива) | Нет | Только 0x0409 (English) |
 | **Product String** | `USBCore.cpp:49`, `platform.txt:142` | Да `build.usb_product` | Нет | |
 | **Manufacturer String** | `USBCore.cpp:66`, `platform.txt:142` | Да `build.usb_manufacturer` | Нет | |
-| **Serial Number** | `USBCore.cpp:544-550`, `HID.cpp:65-73` | Да (патч `getShortName`) | Нет | "HIDxx" — не уникален |
-| **GET_STATUS** | `USBCore.cpp:586-599` | Да (исходники) | Нет | Endpoint status = всегда 0 |
+| **Serial Number** | `USBCore.cpp:544-550`, `HID.cpp:65-73` | Да (патч: `ISERIAL→0`) | Нет | Патчер всегда ставит iSerialNumber=0 (как у G305). Устройства с реальным серийником его теряют — ограничение, решать в сессии полного клона |
+| **GET_STATUS** | `USBCore.cpp:586-599` | Да (исходники) | Нет | Endpoint status = всегда 0 — wontfix: HALT у interrupt-IN мыши не встречается, бенигн |
 | **GET_DESCRIPTOR** | `USBCore.cpp:514-561` | Да (расширяемо) | Нет | |
 | **SET_ADDRESS** | `USBCore.cpp:617-621` | Да | Нет | |
 | **SET_CONFIGURATION** | `USBCore.cpp:634-642` | Да | Нет | |
-| **GET_CONFIGURATION** | `USBCore.cpp:630-633` | Да | Нет | **Баг: всегда 1** |
+| **GET_CONFIGURATION** | `USBCore.cpp:630-633` | Да (патч) | Нет | **ИСПРАВЛЕНО: отвечает `Send8(_usbConfiguration)`** (IdentityPatcher) |
 | **SET_FEATURE (Wakeup)** | `USBCore.cpp:609-616` | Да | Нет | |
 | **CLEAR_FEATURE (Wakeup)** | `USBCore.cpp:601-608` | Да | Нет | |
-| **SET_FEATURE (HALT)** | `USBCore.cpp:593-599` | Да | Нет | **НЕ РЕАЛИЗОВАН** |
-| **GET_INTERFACE** | `USBCore.cpp:643-645` | Да | Нет | Пустой обработчик |
-| **HID_GET_REPORT** | `HID.cpp:109-111` | Да (патч) | Нет | **НЕ РЕАЛИЗОВАН (stub)** |
-| **HID_SET_REPORT** | `HID.cpp:134-143` | Да (патч) | Нет | **НЕ РЕАЛИЗОВАН** |
-| **HID_GET_PROTOCOL** | `HID.cpp:113-115` | Да (патч) | Нет | **НЕ РЕАЛИЗОВАН (stub)** |
+| **SET_FEATURE (HALT)** | `USBCore.cpp:593-599` | Да | Нет | wontfix: HALT на interrupt-IN мыши хост не шлёт, бенигн |
+| **GET_INTERFACE** | `USBCore.cpp:643-645` | Да | Нет | wontfix: alt-настроек нет, пустой обработчик корректен |
+| **HID_GET_REPORT** | `HID.cpp:109-111` | Да (патч) | Нет | Capability (Feature id 4) отдаётся из `hid_capability_blob.h`; остальные — stall (было: пустой пакет) |
+| **HID_SET_REPORT** | `HID.cpp:134-143` | Да (патч) | Нет | Командный ring (Output/Feature, bounded copy, drop-new) |
+| **HID_GET_PROTOCOL** | `HID.cpp:113-115` | Да (патч) | Нет | **ИСПРАВЛЕНО: `USB_SendControl(0, &protocol, 1)`** |
 | **HID_SET_PROTOCOL** | `HID.cpp:124-128` | Да (патч) | Нет | Реализован, но без поведения |
-| **HID_GET_IDLE** | `HID.cpp:117-118` | Да (патч) | Нет | **НЕ РЕАЛИЗОВАН (stall)** |
+| **HID_GET_IDLE** | `HID.cpp:117-118` | Да (патч) | Нет | **ИСПРАВЛЕНО: `USB_SendControl(0, &idle, 1)` вместо stall** |
 | **HID_SET_IDLE** | `HID.cpp:130-132` | Да (патч) | Нет | Реализован |
 | **Remote Wakeup** | `USBCore.cpp:854-872` | Да (макрос + регистры) | Аппаратно (RMWKUP) | Работает |
-| **Suspend/Resume** | `USBCore.cpp:758-806` | Да | Аппаратно (UDINT) | **PLL не отключается — нарушение USB** |
+| **Suspend/Resume** | `USBCore.cpp:758-806` | Да | Аппаратно (UDINT) | wontfix: гасить PLL рискованно для стабильности; 15–20 мА в suspend вместо 0.5 мА — принято |
 | **Endpoint инициализация** | `USBCore.cpp:365-382` | Да | **Max 7 EP** | Double-buffered при EP_SIZE=64 |
 | **USB Speed** | `USBCore.cpp:747` | Нет | **Full Speed (12 Mbps)** фиксир. | |
 | **VBUS detection** | `USBCore.cpp:810-815` | Да | **Нет на Leonardo hardware** | Леонардо не подключает VBUS pin |
 | **Clock Source** | `USBCore.cpp:689-696` | Нет | 8 или 16 МГц кварц | Leonardo: 16 МГц |
-| **SendReport (фрагментация)** | `HID.cpp:89-95` | Да (патч) | Нет | **ID и данные - два отдельных пакета** |
+| **SendReport (фрагментация)** | `HID.cpp:89-95` | Да (патч, v4) | Нет | **ИСПРАВЛЕНО: id+payload одним пакетом** |
 
 ---
 
@@ -912,14 +913,14 @@ int HID_::SendReport(uint8_t id, const void* data, int len) {
 
 4. **`bcdHID = 1.01`** (`HID.h:121`) — должен быть 1.11.
 
-5. **Отсутствует реализация `HID_GET_REPORT`, `HID_GET_PROTOCOL`, `HID_GET_IDLE`** — нарушение спецификации HID.
+5. ~~Отсутствует реализация `HID_GET_REPORT`, `HID_GET_PROTOCOL`, `HID_GET_IDLE`~~ — закрыто: capability readback + spec-ответы (v3).
 
-6. **`GET_CONFIGURATION` всегда возвращает 1** (`USBCore.cpp:632`) — баг, нарушающий USB-спецификацию.
+6. ~~`GET_CONFIGURATION` всегда возвращает 1~~ — закрыто: `Send8(_usbConfiguration)` (IdentityPatcher).
 
-7. **PLL не отключается при suspend** (`USBCore.cpp:800-801`) — нарушение требования по питанию в suspend (<=500 мкА для bus-powered).
+7. **PLL не отключается при suspend** — wontfix (см. таблицу).
 
-8. **Serial Number не уникален** — одинаков для всех прошивок с тем же размером дескриптора.
+8. **Serial Number**: патчер ставит `iSerialNumber=0` (как у G305); устройства с реальным серийником — ограничение до сессии полного клона.
 
-9. **Report ID отправляется отдельным пакетом** (`HID.cpp:91`) — удваивает latency, может сбивать некоторые хабы/BIOS.
+9. ~~Report ID отдельным пакетом~~ — закрыто: `SendReport` одним пакетом (v4).
 
 10. **`bRemoteWakeup` флаг всегда включён в конфигурации** — даже если клонируемое устройство его не поддерживает.

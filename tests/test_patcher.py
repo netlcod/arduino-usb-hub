@@ -543,7 +543,12 @@ def test_patch_hid_command_core_upgrades_stale_core(tmp_path):
     CommandChannelPatcher.patch_hid_command_core(tmp_path)
 
     cpp = (hid / "HID.cpp").read_text(encoding="utf-8")
-    assert "// HUB_PATCH_VERSION 3" in cpp
+    assert "// HUB_PATCH_VERSION 4" in cpp
+    # v4: SendReport ships id+payload as one USB packet (stale fixture
+    # carries the stock two-packet form).
+    assert "uint8_t buf[len + 1];" in cpp
+    assert "USB_Send(pluggedEndpoint | TRANSFER_RELEASE, buf, len + 1)" in cpp
+    assert "auto ret = USB_Send(pluggedEndpoint, &id, 1);" not in cpp
     # Atomic ring read upgraded.
     assert "cli();" in cpp
     assert "sei();" in cpp
@@ -776,6 +781,48 @@ def test_usbcore_descriptor_unexpected_form_raises():
 
     with pytest.raises(PatchError):
         IdentityPatcher._usbcore_descriptor_content("D_DEVICE(broken);", _identity_device())
+
+
+STOCK_SENDREPORT = """\
+int HID_::SendReport(uint8_t id, const void* data, int len)
+{
+\tauto ret = USB_Send(pluggedEndpoint, &id, 1);
+\tif (ret < 0) return ret;
+\tauto ret2 = USB_Send(pluggedEndpoint | TRANSFER_RELEASE, data, len);
+\tif (ret2 < 0) return ret2;
+\treturn ret + ret2;
+}
+"""
+
+STOCK_GET_CONFIGURATION = """\
+\t\telse if (GET_CONFIGURATION == r)
+\t\t{
+\t\t\tSend8(1);
+\t\t}
+"""
+
+
+def test_sendreport_collapsed_to_single_packet():
+    """Audit tail: stock ships id and payload as two USB packets; the
+    patch must collapse them into one (id followed by payload)."""
+    out = CommandChannelPatcher._patch_hid_cpp(STOCK_SENDREPORT)
+    assert "uint8_t buf[len + 1];" in out
+    assert "USB_Send(pluggedEndpoint | TRANSFER_RELEASE, buf, len + 1)" in out
+    assert "auto ret = USB_Send(pluggedEndpoint, &id, 1);" not in out
+    # Idempotent.
+    assert CommandChannelPatcher._patch_hid_cpp(out) == out
+
+
+def test_usbcore_get_configuration_returns_live_value():
+    """Audit tail: stock GET_CONFIGURATION always answers 1, even before
+    SET_CONFIGURATION (spec: 0 while unconfigured)."""
+    out = IdentityPatcher._usbcore_descriptor_content(
+        STOCK_USBCORE_CPP + STOCK_GET_CONFIGURATION, _identity_device()
+    )
+    assert "Send8(_usbConfiguration);" in out
+    assert "Send8(1);" not in out
+    # Idempotent.
+    assert IdentityPatcher._usbcore_descriptor_content(out, _identity_device()) == out
 
 
 def test_hid_h_identity_writes_both_bcd_bytes_and_country():
