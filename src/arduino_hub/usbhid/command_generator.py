@@ -12,19 +12,23 @@ Produces:
 - `generate_capability_blob(command, schema)` — the static capability
   report payload served by GET_REPORT(Feature).
 
-Fixed protocol constants (see the audit/plan: these four values must not
+Fixed protocol constants (see the audit/plan: these values must not
 be confused):
 
-    Report ID (command)         = 3
-    descriptor payload (count)  = 15
-    SET_REPORT wLength          = 15
-    hidapi buffer length        = 16  ([ID][payload x 15])
+    Report ID (command)                 = 3
+    payload (descriptor REPORT_COUNT)   = 15
+    hidapi buffer length                = 16  ([ID][payload x 15])
+
+Note on SET_REPORT wLength: the descriptor REPORT_COUNT is 15, but
+Windows carries the control transfer with wLength == 16 — HidD_*
+duplicates the report id byte into the data stage. The core SET_REPORT
+handler accepts both and strips the duplicated id (see HID.cpp patch).
 
 Capability (meta-level interface, optional):
 
-    Report ID (capability)      = 4
-    descriptor payload          = 8
-    hidapi buffer length        = 9
+    Report ID (capability)              = 4
+    descriptor payload (REPORT_COUNT)   = 8
+    hidapi buffer length                = 9
 """
 
 from __future__ import annotations

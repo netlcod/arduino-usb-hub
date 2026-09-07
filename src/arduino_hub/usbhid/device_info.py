@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 
@@ -107,6 +109,9 @@ class DeviceInfo:
     ep_interval_ms: int = 1
 
     # ── HID Report ──────────────────────────────────────
+    # NOTE: report_length for a SOURCE profile counts the full report
+    # including the report id byte (G305: 9 = id + 8 payload). Target
+    # profiles count payload only (generic_3btn: 4) — see targets.py.
     hid_report_descriptors: list[HIDReportDescriptor] = field(default_factory=list)
     report_id: int = 1
     report_length: int = 4
@@ -121,10 +126,6 @@ class DeviceInfo:
 
     # ── Internal (not for Arduino patching) ─────────────
     path: bytes = field(default=b"", repr=False)
-
-    @property
-    def report_descriptor_size(self) -> int:
-        return sum(len(r.data) for r in self.hid_report_descriptors)
 
     @property
     def has_serial(self) -> bool:

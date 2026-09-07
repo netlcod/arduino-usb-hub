@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import re
 import shutil
@@ -15,7 +17,7 @@ from arduino_hub.core.patcher import (
 )
 from arduino_hub.core.validation import has_errors, summarize, validate_identity
 from arduino_hub.devices import load as load_device, save as save_device
-from arduino_hub.exceptions import PatchError
+from arduino_hub.exceptions import CoreNotFoundError, PatchError
 from arduino_hub.targets import load_target
 from arduino_hub.usbhid.command_schema import load_command_schema
 from arduino_hub.usbhid.descriptor_reader import parse_report
@@ -60,13 +62,11 @@ def cmd_clone(base_dir: Path, name: str, report: Path) -> None:
 
     report = report.resolve()
     if not report.exists():
-        logger.error("Report not found: %s", report)
-        return
+        raise PatchError(f"Report not found: {report}")
 
     device = parse_report(report)
     if device is None:
-        logger.error("Failed to parse report: %s", report)
-        return
+        raise PatchError(f"Failed to parse report: {report}")
 
     save_device(device, name, base_dir)
 
@@ -203,19 +203,16 @@ def cmd_compile(
 
     sketch = sketch.resolve()
     if not sketch.exists():
-        logger.error("Sketch not found: %s", sketch)
-        return
+        raise PatchError(f"Sketch not found: {sketch}")
 
     mgr = ArduinoCLIManager(base_dir, cli_version)
     executor = mgr.ensure_cli()
 
     core_path = ArduinoCoreInstaller.find_path(base_dir, core_version)
     if core_path is None:
-        logger.error(
-            "AVR core %s not found. Run 'arduino-hub setup' first.",
-            core_version,
+        raise CoreNotFoundError(
+            f"AVR core {core_version} not found. Run 'arduino-hub setup' first."
         )
-        return
 
     executor.compile(sketch, fqbn)
     logger.info("Compilation successful.")
@@ -235,8 +232,7 @@ def cmd_flash(
 
     sketch = sketch.resolve()
     if not sketch.exists():
-        logger.error("Sketch not found: %s", sketch)
-        return
+        raise PatchError(f"Sketch not found: {sketch}")
 
     mgr = ArduinoCLIManager(base_dir, cli_version)
     executor = mgr.ensure_cli()

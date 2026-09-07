@@ -127,10 +127,11 @@ arduino-hub flash --device g305 --target generic_5btn \
    `profiles/protocol/mouse.json` (схема нужна всегда — из неё генерируются
    `mouse_commands.h` и поля capability).
 2. **Валидация профиля** (`core/validation.py: validate_identity`) — до любых
-   записей: ERROR (кавычки/бэкслеш/контрол-символы в строках, пустые строки)
-   ломают `-D` флаги и останавливают patch; WARN (длины >126,
+   записей: ERROR (кавычки/бэкслеш/контрол-символы в строках, пустые строки —
+   ломают `-D` флаги; `ep0_max_packet_size` вне {8,16,32,64} — ломает
+   enumeration без CDC-запасного пути) останавливают patch; WARN (длины >126,
    VID↔производитель по `KNOWN_VENDORS` — актуально для ручных правок профиля,
-   диапазоны power/ep0/bcdUSB/интервал) логируются и попадают в манифест.
+   диапазоны power/bcdUSB/интервал) логируются и попадают в манифест.
 3. Все правки вычисляются **в памяти** как список `FileEdit`
    (`build_patch_edits()`); затем либо пишутся атомарно
    (`apply_edits()`: tmp + `os.replace`), либо печатаются диффом
@@ -153,11 +154,15 @@ arduino-hub flash --device g305 --target generic_5btn \
      bcdHID ← устройства + bCountryCode ← устройства;
    - `HID.cpp`: subclass/protocol интерфейса → boot mouse policy
      (`HID_SUBCLASS_BOOT_INTERFACE, HID_PROTOCOL_MOUSE`; намеренно не из JSON);
-5. `CommandChannelPatcher.patch_hid_command_core()` (v3) — маркер-охраняемые
+5. `CommandChannelPatcher.patch_hid_command_core()` (v5) — маркер-охраняемые
    правки HID.h/HID.cpp командного канала **плюс**: `HID_EP_INTERVAL` define +
    его использование в обоих `D_ENDPOINT` (IN и interrupt OUT), корректные
    ответы GET_IDLE/GET_PROTOCOL (`USB_SendControl(0, &idle|&protocol, 1)`)
-   вместо stall/пустого пакета. Если канал включён, а правка не легла —
+   вместо stall/пустого пакета, `SendReport` одним пакетом (id+payload,
+   с гардом `len <= 0`), живой `GET_CONFIGURATION` в `USBCore.cpp`
+   (`Send8(_usbConfiguration)`). Неузнанная форма `SendReport` или
+   `GET_CONFIGURATION`-хендлера — громкий `PatchError` (тот же fail-loud
+   контракт, что у `D_DEVICE`). Если канал включён, а правка не легла —
    пайплайн падает с `PatchError`.
 6. `write_hid_command_config()` / `write_hid_capability_blob()` — генерация
    `hid_command_config.h` / `hid_capability_blob.h` в ядро (переписываются

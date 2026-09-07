@@ -95,8 +95,8 @@ Dependencies (`hidapi`, `requests`) are pulled from PyPI.
 # 1. One-time setup (downloads arduino-cli, installs AVR core 1.8.6)
 arduino-hub setup
 
-# 2. Clone a connected HID device (interactive)
-arduino-hub clone --name mymouse
+# 2. Clone a device from its USB Device Tree Viewer report
+arduino-hub clone --name mymouse --report profiles/sources/reports/usb-report.txt
 
 # 3. Flash your sketch onto Leonardo
 arduino-hub flash --device mymouse --sketch examples/mouse/mouse.ino --port COM6
@@ -108,8 +108,8 @@ Steps 1–2 are run once. To re-flash the same device later, just repeat step 3.
 
 ### `setup`
 
-Downloads `arduino-cli` and installs the AVR core. Idempotent — re-running
-skips work that is already done.
+Downloads `arduino-cli` (SHA256-pinned release archive) and installs the AVR
+core. Idempotent — re-running skips work that is already done.
 
 ```bash
 arduino-hub setup
@@ -124,14 +124,17 @@ Optional flags:
 
 ### `clone`
 
-Lists all connected HID devices, lets you pick one interactively, opens it to
-read descriptors, and saves everything to `profiles/sources/<name>.json`.
+Parses a USB Device Tree Viewer report (`File → Save report info` in
+[USB Device Tree Viewer](https://www.uwe-sieber.de/usbtreeview_e.html)) and
+saves the full device identity — VID/PID, descriptors, strings, serial
+number (if the device has one) and the reconstructed HID report descriptor —
+to `profiles/sources/<name>.json`.
 
 ```bash
 arduino-hub clone --name mydevice --report profiles/sources/reports/usb-report.txt
 ```
 
-The saved JSON file contains:
+The saved JSON file contains the full USB identity:
 
 ```json
 {
@@ -140,7 +143,8 @@ The saved JSON file contains:
   "product_id": "0xC53F",
   "manufacturer_string": "Logitech",
   "product_string": "USB Receiver",
-  "serial_number": ""
+  "serial_number": "",
+  "...": "descriptors, bcdUSB, EP0 size, power, report layout, axes"
 }
 ```
 

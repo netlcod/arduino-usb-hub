@@ -1,11 +1,13 @@
 """Command channel generator tests.
 
-Locks the four fixed protocol values from the architecture contract:
+Locks the fixed protocol values from the architecture contract:
 
-    Report ID (command)         = 3
-    descriptor payload (count)  = 15
-    SET_REPORT wLength          = 15   (data stage, no report id byte)
-    hidapi buffer length        = 16   ([ID][payload x 15])
+    Report ID (command)                 = 3
+    payload (descriptor REPORT_COUNT)   = 15
+    hidapi buffer length                = 16   ([ID][payload x 15])
+
+    (Windows carries SET_REPORT with wLength == 16 — HidD_* duplicate
+    the report id into the data stage; the core handler strips it.)
 
 Capability (meta-level, optional): report id 4, payload 8, buffer 9.
 """
@@ -62,7 +64,9 @@ def test_fixed_protocol_constants():
 
 def test_descriptor_payload_count_is_15():
     # The REPORT_COUNT byte (after 0x95) in the command write block is
-    # the SET_REPORT data stage length: 15, not 16.
+    # the 15-byte payload; Windows then carries SET_REPORT with
+    # wLength == 16 (id duplicated in the data stage, stripped by the
+    # core handler).
     descriptor = generate_command_descriptor(FEATURE_CMD, NO_CAPABILITY)
     assert descriptor[18] == 0x95
     assert descriptor[19] == 15

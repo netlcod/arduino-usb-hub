@@ -37,12 +37,14 @@ src/arduino_hub/
   targets.py         — load/save target profiles from profiles/targets/<name>.json
   cli/
     downloader.py    — ArduinoCLIDownloader: download + extract arduino-cli.exe
+                       (SHA256-pinned archive, .version marker for stale-CLI warning)
     executor.py      — ArduinoCLIExecutor: thin subprocess wrapper
     manager.py       — ArduinoCLIManager: ensure_cli() → executor
   core/
     installer.py     — ArduinoCoreInstaller: ensure_version(), find_path()
-    patcher.py       — IdentityPatcher (patch_usb_core/patch_boards_txt/
-                       patch_usbcore/patch_usbc_h/patch_hid), CommandChannelPatcher
+    patcher.py       — IdentityPatcher (D_DEVICE/bcdDevice/iSerialNumber+serial,
+                       boards.txt, USBCore.h guard, D_HIDREPORT, boot policy),
+                       CommandChannelPatcher
                        (write_hid_command_config, write_hid_capability_blob,
                        patch_hid_command_core — versioned via
                        // HUB_PATCH_VERSION), LibraryPatcher
@@ -54,9 +56,12 @@ src/arduino_hub/
                        (_atomic_write_text: tmp + os.replace)
     validation.py    — validate_identity(DeviceInfo) → [ValidationIssue]:
                        ERROR ломают -D флаги (кавычки/бэкслеш/контрол-символы,
-                       пустые строки); WARN — длины >126, VID↔производитель
-                       (KNOWN_VENDORS, только для ручных правок профиля),
-                       диапазоны power/ep0/bcdUSB/интервал
+                       пустые строки, серийник), enumeration (ep0 вне
+                       {8,16,32,64}) или валидность дескриптора (power вне
+                       1..500, bmAttributes без бита 0x80); WARN — длины
+                       >126, VID↔производитель (KNOWN_VENDORS, только для
+                       ручных правок профиля), диапазоны bcdUSB/bcd_hid/интервал,
+                       self-powered бит, power > 200
   usbhid/
     device_info.py   — DeviceInfo, AxisSpec (incl. data_index + wire_order),
                        TargetProfile (incl. device_kind), CommandProfile,
@@ -172,10 +177,12 @@ Patch state is recorded in `.build/patches.json`.
 - **`D_HIDREPORT` в HID.h следует wire-layout спеки, а не соседней структуре**: байт 2 = bcdHID LOW, байт 3 = HIGH, байт 4 = country (структура `HIDDescDescriptor` с полем `addr` вводит в заблуждение). Патчер пишет оба байта bcdHID + country; старые ядра с патчем «только младший байт» (на проводе было 0x1101 вместо 0x0111) мигрируются автоматически.
 - **USBCore.h теперь тоже патчится** (`#ifndef USB_CONFIG_ATTRIBUTES` guard, версия `// HUB_PATCH_VERSION 1`): повторный `setup` (перезакачка core) откатывает все правки ядра — штатный путь отката.
 - **GET_IDLE/GET_PROTOCOL отвечают данными** (`USB_SendControl(0, &idle|&protocol, 1)`, v3 патча): до этого GET_IDLE ставился в stall, GET_PROTOCOL возвращал пустой пакет.
-- **SendReport одним пакетом** (v4 патча): сток слал id и payload двумя IN-транзакциями; патчер собирает `buf[len+1]` и шлёт одним `USB_Send(…|TRANSFER_RELEASE,…)`.
+- **SendReport одним пакетом** (v4 патча, guard `len <= 0` с v5): сток слал id и payload двумя IN-транзакциями; патчер собирает `buf[len+1]` и шлёт одним `USB_Send(…|TRANSFER_RELEASE,…)`; v4-ядра без guard мигрируют одной строкой.
 - **GET_CONFIGURATION отвечает живым значением** (`Send8(_usbConfiguration)` вместо стокового `Send8(1)`): патчится в `USBCore.cpp` вместе с дескриптором.
+- **Serial parity**: `clone` парсит String Descriptor 3 (индексно по `iSerialNumber`); профиль с серийником получает `D_DEVICE …,IPRODUCT,3,1)` + generated `hub_serial_string.h` (`HUB_SERIAL_ENABLED` + строка), ядро отдаёт её в `GET_DESCRIPTOR(String, iSerial)`; профиль без серийника — `IPRODUCT,0,1)` (хост строку 3 не запрашивает) + пустой заголовок. Строки серийника валидируются как `-D`-строки (кавычки/бэкслеш/контрол-символы = ERROR). Стоковый `getShortName()` ("HIDxx") остаётся fallback в `#else` — недостижим в обоих состояниях.
+- **Fail-loud в патчере — тотальный**: каждая замена якорится и проверяется результат (маркер/новый текст присутствует после замены), иначе `PatchError`. Молчаливый no-op со штампом версии — та же ошибка класса, что тихий рассинхрон R1.
 - **AVR core path discovery**: uses `find_path()` which scans `arduino-cli-data/packages/arduino/hardware/avr/` for the requested version. No hardcoded path.
-- **Arduino CLI binary is auto-downloaded**: to `.build/tools/` (gitignored). Checks if binary exists before downloading. Windows only.
+- **Arduino CLI binary is auto-downloaded**: to `.build/tools/` (gitignored). Release archive is SHA256-pinned (`CLI_SHA256` in downloader.py; mismatch = loud failure, unpinned version = warning). A `.version` marker records the downloaded version — a stale binary vs `--cli-version` logs a warning. Windows only.
 - **Name conflict with hidapi**: imported as `usbhid/` internally to avoid collision with the `hid` module from hidapi.
 - **G305 receiver: descriptor says Y first, shield-side data is X first** (host-dependent behavior). Windows' own HID caps (`InputCaps` in USB Tree Viewer dumps) decode Y@DataIndex16 before X@17, and the mouse works correctly plugged straight into a PC — yet behind the USB Host Shield the receiver emits X in the earlier field (verified empirically: right→down until calibrated). `profiles/sources/g305.json` keeps `data_index` at the reported ordinals and encodes the calibration in the source-only `wire_order` field (X=16, Y=17 — swapped vs descriptor). Re-running `clone` restores the reported order — re-apply the `wire_order` swap manually; the patch run surfaces the divergence as a `source layout` warning in `.build/patches.json` (never silent). Raw-report diagnostics: `HUB_DEBUG_DUMP` in `hidmouserptparser.h`.
 - **`wire_order` is a sort key, not a bit offset**: `compute_report_layout()`

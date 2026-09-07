@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from arduino_hub.exceptions import InvalidProfileError
 from arduino_hub.usbhid.device_info import AxisSpec, DeviceInfo, TargetProfile
 from arduino_hub.usbhid.hid_items import (
     append_logical,
@@ -252,10 +253,10 @@ def _mapper_constants(prefix: str, layout: ReportLayout) -> list[str]:
 
 
 def _validate_source_wire_order(source: DeviceInfo) -> None:
-    """Raise on duplicate/missing wire order in a source profile."""
+    """Raise on duplicate wire order values in a source profile."""
     orders = [a.wire_order for a in source.axes]
     if len(orders) != len(set(orders)):
-        raise ValueError(
+        raise InvalidProfileError(
             f"Source '{source.name}' has duplicate wire_order values: "
             f"{sorted(orders)}"
         )

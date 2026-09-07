@@ -3,7 +3,7 @@ import logging
 import re
 from pathlib import Path
 
-from arduino_hub.exceptions import DeviceNotFoundError
+from arduino_hub.exceptions import DeviceNotFoundError, InvalidProfileError
 from arduino_hub.usbhid.device_info import DeviceInfo, HIDReportDescriptor, HIDCollection, AxisSpec
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,12 @@ def _fmt_hex(value: int) -> str:
 
 
 def _parse_hex(value: str) -> int:
-    return int(value, 16)
+    try:
+        return int(value, 16)
+    except (TypeError, ValueError) as e:
+        raise InvalidProfileError(
+            f"Profile field expects a hex string like '0x0111', got {value!r}"
+        ) from e
 
 
 def _to_dict(device: DeviceInfo, name: str) -> dict:
@@ -164,8 +169,9 @@ def _from_dict(data: dict) -> DeviceInfo:
         report_length=data.get("report_length", 4),
         button_count=data.get("button_count", 3),
         axes=axes,
-        manufacturer_string=data.get("manufacturer_string", ""),
-        product_string=data.get("product_string", ""),
+        # `or ""` guards profiles where a hand edit set a string to null.
+        manufacturer_string=data.get("manufacturer_string") or "",
+        product_string=data.get("product_string") or "",
         serial_number=data.get("serial_number") or None,
         lang_id=_parse_hex(data.get("lang_id", "0x0409")),
         path=b"",
@@ -206,7 +212,7 @@ def load(name: str, base_dir: Path) -> DeviceInfo:
     data = json.loads(file_path.read_text(encoding="utf-8"))
 
     if "hid_report_descriptors" not in data:
-        raise DeviceNotFoundError(
+        raise InvalidProfileError(
             f"Device '{name}' profile is in the old minimal format "
             f"(no 'hid_report_descriptors'). Re-run "
             f"'arduino-hub clone --name {name} --report <path>' to regenerate."

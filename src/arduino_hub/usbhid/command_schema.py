@@ -21,7 +21,9 @@ Example (profiles/protocol/mouse.json):
     }
 
 Packet framing on the wire (payload only, the Report ID travels in the
-SET_REPORT wValue field and is prepended by hidapi on the PC):
+SET_REPORT wValue field and is prepended by hidapi on the PC; Windows
+additionally duplicates the id into the data stage — wLength 16 — and
+the core handler strips it):
 
     [opcode u8][arg0][arg1]...
 """

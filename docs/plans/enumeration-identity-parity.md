@@ -97,11 +97,13 @@ r"(D_HIDREPORT\(length\) \{ 9, 0x21, 0x01,) 0x[0-9A-Fa-f]{2}(, 0, 1, 0x22)"
 
 Примечания:
 
-- Правки E, H, I, J входят в семейство `_patch_hid_*` / новый `_patch_usbc_h`
-  с версионированием: бамп `HID_CPP_PATCH_VERSION`, ввод `USBC_H_PATCH_VERSION`.
-  Старое ядро апгрейдится in place по существующей схеме `_upgrade_hid_cpp`.
-- `USBCore.cpp` правка A остаётся в `IdentityPatcher.patch_usbcore` (без
-  версии-маркера, идемпотентность по содержимому — как сейчас).
+- Правки E, H, I, J входят в семейство `_patch_hid_*` (реализация сошла с
+  `USBCore.h`-версионирования — правка содержимо-идемпотентна, маркер v1
+  остался). Старое ядро апгрейдится in place по существующей схеме
+  `_upgrade_hid_cpp`.
+- `USBCore.cpp` правка A — в `IdentityPatcher._usbcore_descriptor_content`
+  (без версии-маркера, идемпотентность по содержимому); дисковый враппер
+  `patch_usbcore` удалён (единый путь — `build_patch_edits`).
 - CDC-ветка `D_DEVICE` не трогается: пайплайн всегда отключает CDC до этой
   правки.
 - Device class triple (bDeviceClass/SubClass/Protocol) **не патчится**: при
@@ -142,13 +144,16 @@ KNOWN_VENDORS: dict[int, list[str]]   # ~40 записей, подмножест
 |----------|------|---------|
 | ERROR | manufacturer/product | пустая строка |
 | ERROR | manufacturer/product | содержит `"` или `\` (ломают `-DUSB_PRODUCT`/`-DUSB_MANUFACTURER`) или control-символы (< 0x20) |
-| WARN | manufacturer/product | длина > 126 (лимит USB) |
+| ERROR | serial | при непустом серийнике: `"`/`\`/контрол-символы (ломают generated `hub_serial_string.h`); пустой серийник — норма (iSerialNumber=0) |
+| WARN | manufacturer/product/serial | длина > 126 (лимит USB) |
 | WARN | vendor_id ↔ manufacturer | VID известен (`KNOWN_VENDORS`), но имя производителя не входит в список имён вендора. Пропускать, если строка пустая или `"Unknown"` |
-| WARN | max_power_ma | вне 1..500; отдельно WARN при > 200 (нереалистично для HID) |
-| WARN | ep0_max_packet_size | не в {8, 16, 32, 64} |
+| ERROR (было WARN, поднято 2026-09: вне спецификации дескриптор на проводе, fail-fast до записи) | max_power_ma | вне 1..500; отдельно WARN при > 200 (нереалистично для HID) |
+| ERROR (было WARN, поднято 2026-09: нестандартный EP0 ломает enumeration без CDC-запасного пути, fail-fast до записи) | ep0_max_packet_size | не в {8, 16, 32, 64} |
+| ERROR (добавлено 2026-09: бит 7 — reserved=1, без него конфиг-дескриптор невалиден) | bm_attributes | бит bus-powered (0x80) не установлен |
 | WARN | usb_version | > 0x0200 (ATmega32U4 — Full Speed only) |
 | WARN | device_class | != 0x00 (не воспроизводим патчем) |
 | WARN | bm_attributes | бит self-powered (0x40) установлен (типичные мыши — bus-powered; поведение не эмулируется) |
+| WARN | bcd_hid | > 0xFFFF (в HID-дескриптор попадут только младшие 16 бит) |
 | WARN | ep_interval_ms | < 1 |
 
 Вызов: в `pipeline._patch_for_device` **до** записи файлов. Результаты:

@@ -543,10 +543,11 @@ def test_patch_hid_command_core_upgrades_stale_core(tmp_path):
     CommandChannelPatcher.patch_hid_command_core(tmp_path)
 
     cpp = (hid / "HID.cpp").read_text(encoding="utf-8")
-    assert "// HUB_PATCH_VERSION 4" in cpp
+    assert "// HUB_PATCH_VERSION 5" in cpp
     # v4: SendReport ships id+payload as one USB packet (stale fixture
     # carries the stock two-packet form).
     assert "uint8_t buf[len + 1];" in cpp
+    assert "if (len <= 0) return 0;" in cpp
     assert "USB_Send(pluggedEndpoint | TRANSFER_RELEASE, buf, len + 1)" in cpp
     assert "auto ret = USB_Send(pluggedEndpoint, &id, 1);" not in cpp
     # Atomic ring read upgraded.
@@ -570,8 +571,17 @@ def test_patch_hid_command_core_upgrades_stale_core(tmp_path):
     assert "return USB_SendControl(0, &idle, 1) > 0;" in cpp
 
     h = (hid / "HID.h").read_text(encoding="utf-8")
-    assert "// HUB_PATCH_VERSION 2" in h
+    assert "// HUB_PATCH_VERSION 3" in h
     assert HID_H_MARKER in h
+    # v3 migration: the OUT-API guard gains HID_COMMAND_ENABLED.
+    assert (
+        "#if HID_COMMAND_ENABLED && HID_COMMAND_TRANSPORT == "
+        "HID_COMMAND_TRANSPORT_INTERRUPT_OUT" in h
+    )
+    assert (
+        "#if HID_COMMAND_TRANSPORT == HID_COMMAND_TRANSPORT_INTERRUPT_OUT\n"
+        "  int availableOutReport();" not in h
+    )
 
     # Re-patch at the same version is a no-op (idempotent fast path).
     first = (hid / "HID.cpp").read_bytes()
@@ -608,6 +618,10 @@ def test_install_hub_command_library_and_pc_headers(tmp_path):
 # ── Identity parity transforms (enumeration-identity-parity plan) ──
 
 STOCK_USBCORE_CPP = """\
+#include "USBAPI.h"
+#include "PluggableUSB.h"
+#include <stdlib.h>
+
 #define EP_SINGLE_64 0x32\t// EP0
 #define EP_DOUBLE_64 0x36\t// Other endpoints
 #define EP_SINGLE_16 0x12
@@ -632,6 +646,19 @@ static void core_init(void)
 {
 \tInitEP(0,EP_TYPE_CONTROL,EP_SINGLE_64);\t// init ep0
 }
+
+\t\telse if (setup.wValueL == IMANUFACTURER) {
+\t\t\treturn USB_SendStringDescriptor(STRING_MANUFACTURER, strlen(USB_MANUFACTURER), TRANSFER_PGM);
+\t\t}
+\t\telse if (setup.wValueL == ISERIAL) {
+#ifdef PLUGGABLE_USB_ENABLED
+\t\t\tchar name[ISERIAL_MAX_LEN];
+\t\t\tPluggableUSB().getShortName(name);
+\t\t\treturn USB_SendStringDescriptor((uint8_t*)name, strlen(name), 0);
+#endif
+\t\t}
+\t\telse
+\t\t\treturn false;
 
 #ifdef CDC_ENABLED
 const DeviceDescriptor USB_DeviceDescriptorIAD =
@@ -730,7 +757,13 @@ def test_usbcore_descriptor_patches_ep0_bcd_serial():
     out = IdentityPatcher._usbcore_descriptor_content(STOCK_USBCORE_CPP, device)
     expected = ",32,USB_VID,USB_PID,0x201,IMANUFACTURER,IPRODUCT,0,1)"
     assert out.count(expected) == 2  # both D_DEVICE branches
-    assert "ISERIAL" not in out
+    # No serial in the profile: D_DEVICE no longer names ISERIAL, and the
+    # ISERIAL branch keeps the stock getShortName fallback (unreachable:
+    # the host never requests string 3). Whether HUB_SERIAL_ENABLED is
+    # defined lives in hub_serial_string.h (see serial parity test).
+    assert ",IMANUFACTURER,IPRODUCT,0,1)" in out
+    assert "PluggableUSB().getShortName" in out
+    assert '#include "hub_serial_string.h"' in out
 
     # EP0 hardware allocation routed through the overridable macro and
     # backed by the new bank-size constants.
@@ -748,6 +781,41 @@ def test_usbcore_descriptor_patches_ep0_bcd_serial():
 
     # Idempotent.
     assert IdentityPatcher._usbcore_descriptor_content(out, device) == out
+
+
+def test_usbcore_descriptor_serial_parity():
+    """Full serial parity: a profile with a serial number gets
+    iSerialNumber=3 in D_DEVICE, the ISERIAL branch serves the profile
+    string, and hub_serial_string.h defines the literal."""
+    device = _identity_device(serial_number="SN12345")
+    out = IdentityPatcher._usbcore_descriptor_content(STOCK_USBCORE_CPP, device)
+    assert out.count(",32,USB_VID,USB_PID,0x201,IMANUFACTURER,IPRODUCT,3,1)") == 2
+    assert "#ifdef HUB_SERIAL_ENABLED" in out
+    assert "HUB_SERIAL_STRING, strlen(HUB_SERIAL_STRING), 0" in out
+    assert '#include "hub_serial_string.h"' in out
+    # Idempotent.
+    assert IdentityPatcher._usbcore_descriptor_content(out, device) == out
+
+    header = IdentityPatcher.serial_string_header(device)
+    assert "#define HUB_SERIAL_ENABLED 1" in header
+    assert '#define HUB_SERIAL_STRING "SN12345"' in header
+    # No-serial profile: empty string, no ENABLED.
+    empty = IdentityPatcher.serial_string_header(_identity_device())
+    assert "HUB_SERIAL_ENABLED" not in empty
+    assert '#define HUB_SERIAL_STRING ""' in empty
+
+
+def test_usbcore_serial_unrecognized_branch_raises():
+    import pytest
+
+    from arduino_hub.exceptions import PatchError
+
+    weird = STOCK_USBCORE_CPP.replace(
+        "\t\t\tPluggableUSB().getShortName(name);\n",
+        "\t\t\tPluggableUSB().getShortNameEx(name);\n",
+    )
+    with pytest.raises(PatchError):
+        IdentityPatcher._usbcore_descriptor_content(weird, _identity_device(serial_number="X"))
 
 
 def test_usbcore_descriptor_migrates_old_patch_form():
@@ -805,12 +873,72 @@ STOCK_GET_CONFIGURATION = """\
 def test_sendreport_collapsed_to_single_packet():
     """Audit tail: stock ships id and payload as two USB packets; the
     patch must collapse them into one (id followed by payload)."""
-    out = CommandChannelPatcher._patch_hid_cpp(STOCK_SENDREPORT)
+    out = CommandChannelPatcher._sendreport_content(STOCK_SENDREPORT)
+    assert "if (len <= 0) return 0;" in out
     assert "uint8_t buf[len + 1];" in out
     assert "USB_Send(pluggedEndpoint | TRANSFER_RELEASE, buf, len + 1)" in out
     assert "auto ret = USB_Send(pluggedEndpoint, &id, 1);" not in out
     # Idempotent.
-    assert CommandChannelPatcher._patch_hid_cpp(out) == out
+    assert CommandChannelPatcher._sendreport_content(out) == out
+
+
+def test_sendreport_unexpected_form_raises():
+    """A present-but-unrecognized SendReport must fail loud, not stamp
+    v4 over unpatched content (same contract as D_DEVICE)."""
+    import pytest
+
+    from arduino_hub.exceptions import PatchError
+
+    weird = STOCK_SENDREPORT.replace(
+        "auto ret2 = USB_Send(pluggedEndpoint | TRANSFER_RELEASE, data, len);",
+        "auto ret2 = USB_SendCooked(pluggedEndpoint, data, len);",
+    )
+    with pytest.raises(PatchError):
+        CommandChannelPatcher._sendreport_content(weird)
+
+
+# What the v4 patcher produced: single-packet SendReport without the
+# v5 len guard.
+V4_NOGUARD_SENDREPORT = """\
+int HID_::SendReport(uint8_t id, const void* data, int len)
+{
+\t// Single USB packet: report id followed by the payload.
+\t// (Stock sent id and data as two packets; hosts expect one.)
+\tuint8_t buf[len + 1];
+\tbuf[0] = id;
+\tmemcpy(buf + 1, data, len);
+\treturn USB_Send(pluggedEndpoint | TRANSFER_RELEASE, buf, len + 1);
+}
+"""
+
+
+def test_capability_blob_migration_unrecognized_raises():
+    """An inline blob block that deviates from the exact v4 form must
+    fail loud — not silently rename the array to an undefined macro and
+    stamp the version over a broken file."""
+    import pytest
+
+    from arduino_hub.exceptions import PatchError
+
+    weird = (
+        "#if HID_COMMAND_ENABLED && HID_CAPABILITY_ENABLED // stray\n"
+        "static const uint8_t _capabilityReport[] PROGMEM = {\n"
+        "\t'H', 'C',\n"
+        "};\n"
+        "#endif\n"
+    )
+    with pytest.raises(PatchError):
+        CommandChannelPatcher._upgrade_hid_cpp(weird)
+
+
+def test_sendreport_v4_without_guard_upgraded_not_rejected():
+    """A core stamped by the v4 patcher (single packet, no len guard)
+    must be healed with one line — not fail loud as unrecognized."""
+    out = CommandChannelPatcher._sendreport_content(V4_NOGUARD_SENDREPORT)
+    assert "if (len <= 0) return 0;" in out
+    assert "uint8_t buf[len + 1];" in out
+    # Idempotent.
+    assert CommandChannelPatcher._sendreport_content(out) == out
 
 
 def test_usbcore_get_configuration_returns_live_value():
@@ -823,6 +951,24 @@ def test_usbcore_get_configuration_returns_live_value():
     assert "Send8(1);" not in out
     # Idempotent.
     assert IdentityPatcher._usbcore_descriptor_content(out, _identity_device()) == out
+
+
+def test_usbcore_get_configuration_anchored_to_handler():
+    """An unrelated Send8(1) elsewhere must not be patched, and a
+    present-but-unrecognized handler must fail loud."""
+    import pytest
+
+    from arduino_hub.exceptions import PatchError
+
+    # Unrelated Send8(1) with no GET_CONFIGURATION handler: untouched.
+    other = "void f(void)\n{\n\tSend8(1);\n}\n"
+    assert (
+        IdentityPatcher._usbcore_get_config_content(other) == other
+    )
+    # Handler present but body unrecognized: PatchError.
+    weird = STOCK_GET_CONFIGURATION.replace("Send8(1);", "Send8(2);")
+    with pytest.raises(PatchError):
+        IdentityPatcher._usbcore_get_config_content(weird)
 
 
 def test_hid_h_identity_writes_both_bcd_bytes_and_country():
@@ -922,6 +1068,7 @@ def test_build_patch_edits_apply_and_dry_run(tmp_path):
     paths = {e.path.name for e in edits}
     assert {
         "boards.txt", "USBCore.cpp", "USBCore.h", "HID.h", "HID.cpp",
+        "hub_serial_string.h",
         "hid_command_config.h", "hid_capability_blob.h",
         "hid_profile.h", "hid_mapper.h", "Mouse.cpp", "Mouse.h",
         "MouseCommandHandler.cpp", "mouse_commands.h", "command_channel.h",

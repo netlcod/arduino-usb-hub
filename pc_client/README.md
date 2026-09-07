@@ -13,6 +13,7 @@ vendor collection и шлёт бинарные команды: движение,
 ```
 include/hubclient/
   transport.hpp      CommandTransport: FeatureReportTransport / OutputReportTransport
+                     (interrupt_out использует OutputReportTransport — тот же hid_write)
   capability.hpp     чтение capability report (GET_REPORT Feature, report id 4)
   mouse_client.hpp   MouseClient — высокоуровневый API: open / move / wheel / click / ...
 examples/
@@ -79,9 +80,11 @@ if (mouse.open(vid, pid)) {      // ищет vendor collection (usage page 0xFF0
 
 Эти инварианты нельзя нарушать при доработках:
 
-- **Оффсеты и опкоды — только через макросы** из `target/mouse_commands.h`
+- **Оффсеты и опкоды команд — только через макросы** из `target/mouse_commands.h`
   (`MOUSE_CMD_*`, `MOUSE_CMD_*_OFF/_SIZE/_LEN`). Никогда не хардкодить байтовые
-  оффсеты пакетов.
+  оффсеты пакетов команд. Framing hidapi (`buf[0]` = report id, payload с `buf[1]`)
+  и layout capability-блоба — структурные константы генератора
+  (`command_generator.py`), а не часть схемы команд.
 - **Фиксированные константы канала** (живут в command_generator.py
   arduino-usb-hub, НЕ конфигурируются): command report id 3, payload 15,
   hidapi buffer 16 (`[report id][payload]`), capability report id 4,
@@ -93,8 +96,11 @@ if (mouse.open(vid, pid)) {      // ищет vendor collection (usage page 0xFF0
     hidraw и без interrupt OUT endpoint падает;
   - `interrupt_out` — кроссплатформенно, устройство поллит команды из `loop()`.
 - **Capability**: если в target включён (`capability.enabled`), клиент при
-  `open()` читает реальный transport/report id/payload len из устройства и они
-  переопределяют дефолты из `command_channel.h`. При `HID_CAPABILITY_ENABLED == 0`
-  чтение скомпилировано out.
+  `open()` читает capability report и сверяет его с собранными дефолтами.
+  command report id и payload len подставляются из ответа **только когда
+  совпадают с дефолтами** из `command_channel.h` (несовпадение = клиент
+  собран под другой patch-ран — используются дефолты). Transport всегда
+  compile-time (`#if` по `HID_COMMAND_TRANSPORT`) и capability его не меняет.
+  При `HID_CAPABILITY_ENABLED == 0` чтение скомпилировано out.
 - **Кнопки — логические числа 1..16**, маппятся в биты на стороне прошивки;
   один и тот же код работает для 3/5/16-кнопочных targets.

@@ -303,23 +303,64 @@ class ReportParser:
         if m:
             result["lang_id"] = int(m.group(1), 16)
 
-        # iManufacturer
-        s = _parse_string_field(section, 'Language 0x0409')
-        # Actually we need to find the right string. Look for iManufacturer reference then nearby string.
-        # Simpler: just find all "Language 0x0409" strings in order.
-        strings = re.findall(r'Language 0x0409\s*:\s*"([^"]*)"', section)
-        # String 1 = manufacturer, String 2 = product
-        if len(strings) >= 1:
-            result["manufacturer_string"] = strings[0]
-        if len(strings) >= 2:
-            result["product_string"] = strings[1]
-
-        # Serial: check iSerialNumber in device descriptor
+        # Index-based mapping: the Device Descriptor declares which string
+        # index holds manufacturer/product/serial; the String Descriptor
+        # sections carry the strings themselves. Falls back to the
+        # positional order of quoted strings when indices are absent.
         dev_sec = self._section("Device Descriptor", "Configuration Descriptor")
-        if dev_sec:
-            m = re.search(r"iSerialNumber\s*:\s*0x00\s*\(No String Descriptor\)", dev_sec)
-            if m:
-                result["serial_number"] = None
+
+        def _string_index(key: str) -> int | None:
+            if not dev_sec:
+                return None
+            m = re.search(rf"{re.escape(key)}\s*:\s*0x([0-9A-Fa-f]+)", dev_sec)
+            return int(m.group(1), 16) if m else None
+
+        by_index: dict[int, str] = {}
+        desc_blocks = re.findall(
+            r"-{5,}\s*String Descriptor (\d+)\s*-{5,}(.*?)(?=(?:-{5,}\s*String Descriptor \d+\s*-{5,})|\Z)",
+            section,
+            re.DOTALL,
+        )
+        for idx_s, body in desc_blocks:
+            strings = re.findall(r'Language 0x[0-9A-Fa-f]{4}\s*:\s*"([^"]*)"', body)
+            if strings:
+                by_index[int(idx_s)] = strings[0]
+
+        im_idx = _string_index("iManufacturer")
+        ip_idx = _string_index("iProduct")
+        is_idx = _string_index("iSerialNumber")
+
+        if im_idx is not None and im_idx in by_index:
+            result["manufacturer_string"] = by_index[im_idx]
+        if ip_idx is not None and ip_idx in by_index:
+            result["product_string"] = by_index[ip_idx]
+        if is_idx:  # non-zero index → serial exists
+            if is_idx in by_index:
+                result["serial_number"] = by_index[is_idx]
+            else:
+                # Serial index declared but the string descriptor is
+                # missing from the report (truncated dump). The clone
+                # would silently lose the serial — make it visible.
+                logger.warning(
+                    "Device declares iSerialNumber=%d but the report "
+                    "contains no String Descriptor %d; the clone will "
+                    "have no serial (identity parity lost)",
+                    is_idx,
+                    is_idx,
+                )
+
+        # Positional fallback (legacy behaviour) when indices could not
+        # be resolved.
+        if "manufacturer_string" not in result and "product_string" not in result:
+            positional = re.findall(r'Language 0x0409\s*:\s*"([^"]*)"', section)
+            if len(positional) >= 1:
+                result["manufacturer_string"] = positional[0]
+            if len(positional) >= 2:
+                result["product_string"] = positional[1]
+
+        # iSerialNumber 0x00 explicitly means "no serial".
+        if re.search(r"iSerialNumber\s*:\s*0x00", dev_sec or ""):
+            result["serial_number"] = None
 
         return result
 
@@ -499,17 +540,11 @@ class ReportParser:
             buf.extend((0x75, 0x01))
             # REPORT_COUNT (num_buttons)
             append_report_count(buf, num_buttons)
-            # INPUT (Data | Variable | Absolute)
-            flags = 0x02  # Data | Variable | Absolute
-            if not bc.is_variable:
-                flags &= ~0x02  # Clear Variable → Array
-            if bc.is_absolute:
-                flags &= ~0x04  # Absolute bit clear in HID spec? No - Absolute=0 in BitField but 0 in flags
-            # Actually: BitField: Bit1=Variable(=1), Bit2=Absolute(=0)
-            # HID INPUT flags: bit 0=Data(1), bit 1=Var(1), bit 2=Rel(0 for Abs)
-            flags = 0x02  # Data | Variable | Abs
-
-            buf.extend((0x81, flags))
+            # INPUT (Data | Variable | Absolute). Buttons in mouse
+            # collections are always Data|Var|Abs (bit field, absolute);
+            # the caps' is_variable/is_absolute flags are informational
+            # and never diverge for mice.
+            buf.extend((0x81, 0x02))
 
             # Padding to byte boundary
             remainder = num_buttons % 8
@@ -586,7 +621,7 @@ class ReportParser:
         info = DeviceInfo(
             vendor_id=dev_desc.get("vendor_id") or summary.get("vendor_id") or 0,
             product_id=dev_desc.get("product_id") or summary.get("product_id") or 0,
-            bcd_device=dev_desc.get("bcd_device") or 0x4401,
+            bcd_device=dev_desc.get("bcd_device") or 0x0100,
             usb_version=dev_desc.get("usb_version") or 0x0200,
             device_class=dev_desc.get("device_class") or 0,
             device_subclass=dev_desc.get("device_subclass") or 0,

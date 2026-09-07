@@ -3,6 +3,12 @@
 Target profiles live in profiles/targets/<name>.json and describe the
 report the Leonardo will present to the PC (unlike source profiles in
 profiles/sources/<name>.json, which describe what the receiver sends).
+
+Report-length convention (a common hand-edit trap):
+- target `report_length` counts PAYLOAD bytes WITHOUT the report id
+  byte (generic_3btn: 4 = buttons byte + X + Y + wheel, id 1 implicit);
+- source `report_length` counts the FULL report INCLUDING the id byte
+  (G305: 9 = id + 8 payload bytes).
 """
 
 import json
@@ -67,7 +73,9 @@ def validate_target(profile: TargetProfile) -> None:
         raise InvalidTargetError(
             f"Target '{profile.name}' report_length {profile.report_length} does "
             f"not match the computed report payload {layout.payload_len} "
-            f"(buttons {profile.buttons}, axes {[a.bits for a in profile.axes]})"
+            f"(buttons {profile.buttons}, axes {[a.bits for a in profile.axes]}). "
+            f"Note: target report_length counts payload bytes WITHOUT the "
+            f"report id (source profiles count it — do not copy that number)"
         )
 
 
@@ -84,7 +92,12 @@ def _fmt_hex(value: int) -> str:
 
 
 def _parse_hex(value: str) -> int:
-    return int(value, 16)
+    try:
+        return int(value, 16)
+    except (TypeError, ValueError) as e:
+        raise InvalidTargetError(
+            f"Target field expects a hex string like '0x0238', got {value!r}"
+        ) from e
 
 
 def _to_dict(profile: TargetProfile) -> dict:

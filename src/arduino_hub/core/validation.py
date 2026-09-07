@@ -118,24 +118,33 @@ def validate_identity(device: DeviceInfo) -> list[ValidationIssue]:
     _check_string(issues, "manufacturer", device.manufacturer_string)
     _check_string(issues, "product", device.product_string)
 
+    # Serial goes into the generated hub_serial_string.h literal: an
+    # empty serial is fine (iSerialNumber stays 0), a present one must
+    # obey the same literal rules as -D strings.
+    if device.serial_number:
+        _check_string(issues, "serial", device.serial_number)
+
     if device.ep0_max_packet_size not in _EP0_SIZES:
         issues.append(
             ValidationIssue(
-                WARN,
+                ERROR,
                 "ep0_max_packet_size",
                 f"bMaxPacketSize0={device.ep0_max_packet_size} is not one of "
-                f"8/16/32/64; the descriptor will carry it verbatim but hosts "
-                f"may reject enumeration",
+                f"8/16/32/64; the EP0 hardware bank and the SendControl "
+                f"release cadence only support these sizes (patch blocked)",
             )
         )
 
     if not 1 <= device.max_power_ma <= 500:
+        # bMaxPower outside the spec produces an invalid descriptor on
+        # the wire (units of 2 mA, legal range 1..250 units) — fail fast
+        # before the patch writes it.
         issues.append(
             ValidationIssue(
-                WARN,
+                ERROR,
                 "max_power_ma",
                 f"bMaxPower={device.max_power_ma} mA outside the legal "
-                f"1..500 range for bus-powered devices",
+                f"1..500 range for bus-powered devices (patch blocked)",
             )
         )
     elif device.max_power_ma > 200:
@@ -145,6 +154,28 @@ def validate_identity(device: DeviceInfo) -> list[ValidationIssue]:
                 "max_power_ma",
                 f"bMaxPower={device.max_power_ma} mA is unrealistic for a HID "
                 f"peripheral (typical mice report 50..100 mA)",
+            )
+        )
+
+    if not device.bm_attributes & 0x80:
+        # Bit 7 (bus-powered) is reserved=1 per spec; without it the
+        # configuration descriptor is invalid and hosts may reject it.
+        issues.append(
+            ValidationIssue(
+                ERROR,
+                "bm_attributes",
+                f"bmAttributes=0x{device.bm_attributes:02X} does not set "
+                f"the bus-powered bit 0x80 (patch blocked)",
+            )
+        )
+
+    if device.bcd_hid > 0xFFFF:
+        issues.append(
+            ValidationIssue(
+                WARN,
+                "bcd_hid",
+                f"bcdHID=0x{device.bcd_hid:X} exceeds 16 bits; only the "
+                f"low 16 bits reach the HID descriptor",
             )
         )
 

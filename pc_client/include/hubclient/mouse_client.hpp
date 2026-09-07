@@ -1,11 +1,14 @@
 // MouseClient — high-level PC side of the command channel.
 //
-// Opens the vendor-defined HID collection (usage page 0xFF00) of the
-// target device and sends binary mouse commands. Opcode/payload layout
-// comes from target/mouse_commands.h (generated from
-// profiles/protocol/mouse.json by arduino-hub), channel wiring defaults from
-// target/command_channel.h; when the firmware has the capability
-// report enabled, the values read at runtime override the defaults.
+// Opens the vendor-defined HID collection (usage page 0xFF00, usage
+// 0x01) of the target device and sends binary mouse commands.
+// Opcode/payload layout comes from target/mouse_commands.h (generated
+// from profiles/protocol/mouse.json by arduino-hub), channel wiring
+// from target/command_channel.h. The capability report (if enabled)
+// is only cross-checked: command report id / payload len are
+// substituted when they MATCH the compiled defaults — a mismatch means
+// the client was built from a different patch run, and the defaults
+// are kept. Transport selection is compile-time and never overridden.
 
 #pragma once
 
@@ -30,16 +33,18 @@ public:
   MouseClient& operator=(const MouseClient&) = delete;
 
   // Open the command channel of the first device with VID/PID whose
-  // enumeration reports the vendor-defined usage page 0xFF00.
+  // enumeration reports the vendor-defined top-level collection
+  // (usage page 0xFF00, usage HID_COMMAND_USAGE).
   // hidapi 0.15: hid_enumerate(vid, pid) — the serial filter argument
-  // was removed; the usage page filter stays manual.
+  // was removed; the usage filter stays manual.
   bool open(uint16_t vid, uint16_t pid) {
     close();
     hid_device_info* info = hid_enumerate(vid, pid);
     const char* path = nullptr;
     for (hid_device_info* it = info; it; it = it->next) {
       if (it->vendor_id == vid && it->product_id == pid &&
-          it->usage_page == HID_COMMAND_USAGE_PAGE) {
+          it->usage_page == HID_COMMAND_USAGE_PAGE &&
+          it->usage == HID_COMMAND_USAGE) {
         path = it->path;
         break;
       }

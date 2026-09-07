@@ -39,6 +39,10 @@ class DeviceNotFoundError(ArduinoHubError):
     """Device info not found in profiles/sources/ directory."""
 
 
+class InvalidProfileError(ArduinoHubError):
+    """Device profile exists but is not a usable source profile."""
+
+
 class TargetNotFoundError(ArduinoHubError):
     """Target profile not found in profiles/targets/ directory."""
 

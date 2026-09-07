@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 
 from arduino_hub.devices import load as load_device
-from arduino_hub.exceptions import InvalidTargetError, TargetNotFoundError
+from arduino_hub.exceptions import (
+    InvalidProfileError,
+    InvalidTargetError,
+    TargetNotFoundError,
+)
 from arduino_hub.targets import load_target
 from arduino_hub.usbhid.device_info import AxisSpec, DeviceInfo
 from arduino_hub.usbhid.hid_generator import source_layout_warnings
@@ -148,7 +152,7 @@ def test_duplicate_wire_order_rejected(tmp_path):
             AxisSpec(usage=0x0238, bits=8, wire_order=2),
         ],
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidProfileError):
         generate_hid_mapper_h(device, load_target("generic_3btn", REPO_ROOT))
 
 # ── Identity profile validation (enumeration-identity-parity plan) ──
@@ -220,10 +224,34 @@ def test_overlong_string_warns_not_errors():
     assert any("longer than 126" in i.message for i in issues)
 
 
-def test_ep0_outside_standard_sizes_warns():
+def test_serial_string_rules():
+    # Valid serial: clean.
+    assert validate_identity(_device(serial_number="SN12345")) == []
+    # Empty/absent serial: fine (iSerialNumber stays 0).
+    assert validate_identity(_device(serial_number=None)) == []
+    assert validate_identity(_device(serial_number="")) == []
+    # Quote/backslash would break the generated hub_serial_string.h literal.
+    issues = validate_identity(_device(serial_number='Bad"Serial'))
+    assert has_errors(issues)
+    assert "serial" in _fields(issues)
+    issues = validate_identity(_device(serial_number="Back\\slash"))
+    assert has_errors(issues)
+    # Whitespace-only serial is effectively empty → ERROR.
+    issues = validate_identity(_device(serial_number="   "))
+    assert has_errors(issues)
+    # Overlong serial: WARN only.
+    issues = validate_identity(_device(serial_number="S" * 200))
+    assert not has_errors(issues)
+    assert any(i.field == "serial" and "longer than 126" in i.message for i in issues)
+
+
+def test_ep0_outside_standard_sizes_errors():
+    # A non-standard EP0 size bricks enumeration with no CDC fallback,
+    # so it must fail fast before patch (ERROR, not WARN).
     issues = validate_identity(_device(ep0_max_packet_size=48))
-    assert WARN in {i.severity for i in issues}
+    assert has_errors(issues)
     assert "ep0_max_packet_size" in _fields(issues)
+    assert validate_identity(_device(ep0_max_packet_size=32)) == []
 
 
 def test_power_rules():
@@ -274,6 +302,38 @@ def test_vendor_coherence_check():
     assert validate_identity(
         _device(vendor_id=0x046D, manufacturer_string="Unknown")
     ) == []
+
+
+def test_legacy_minimal_profile_raises_invalid_profile(tmp_path):
+    """A profile in the old minimal format (no hid_report_descriptors)
+    is not 'not found' — it exists but is unusable."""
+    import json
+
+    from arduino_hub.devices import load as load_device
+    from arduino_hub.exceptions import (
+        DeviceNotFoundError,
+        InvalidProfileError,
+    )
+
+    src = tmp_path / "profiles" / "sources"
+    src.mkdir(parents=True)
+    (src / "oldmouse.json").write_text(
+        json.dumps(
+            {
+                "name": "oldmouse",
+                "vendor_id": "0x046D",
+                "product_id": "0xC53F",
+                "manufacturer_string": "Logitech",
+                "product_string": "USB Receiver",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(InvalidProfileError):
+        load_device("oldmouse", tmp_path)
+    # And a genuinely missing device still raises DeviceNotFoundError.
+    with pytest.raises(DeviceNotFoundError):
+        load_device("nosuchdevice", tmp_path)
 
 
 def test_errors_sorted_first_and_g305_is_clean():

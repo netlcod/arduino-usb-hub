@@ -1,10 +1,13 @@
 // CommandTransport (PC side) — hides how a command packet is delivered
-// over hidapi. Buffers are payload-only; the transport prepends the
-// Report ID byte and zero-pads to the full report length.
+// over hidapi. write() takes the payload only; the transport prepends
+// the Report ID byte and zero-pads to the full report length.
 //
 // hidapi conventions fixed by the command channel contract:
 //   hidapi buffer length      = 1 + payload length  ([report id][payload])
-//   SET_REPORT data stage     = payload length only (no report id byte)
+//   hid_write/hid_send_feature_report get that full buffer; Windows
+//   then carries SET_REPORT with wLength == 1 + payload (the report id
+//   byte is duplicated in the data stage — see the core SET_REPORT
+//   handler, which strips it)
 
 #pragma once
 

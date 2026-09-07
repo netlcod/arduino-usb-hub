@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import difflib
 import hashlib
 import json
@@ -63,8 +65,12 @@ _HID_CAPABILITY_BLOB_NAME = "hid_capability_blob.h"
 # v4: SendReport ships id+payload as a single USB packet (stock sent
 # two back-to-back packets, doubling latency and breaking hosts that
 # expect one IN transaction per report).
-HID_H_PATCH_VERSION = 2
-HID_CPP_PATCH_VERSION = 4
+# v5: SendReport guards non-positive len before the VLA (fail-loud
+# miss detection for unrecognized SendReport/GET_CONFIGURATION forms).
+# HID.h v3: the interrupt-OUT API guard includes HID_COMMAND_ENABLED,
+# matching the guards in HID.cpp and CommandTransport.h.
+HID_H_PATCH_VERSION = 3
+HID_CPP_PATCH_VERSION = 5
 USBCORE_H_MARKER = "#ifndef USB_CONFIG_ATTRIBUTES"
 USBCORE_H_VERSION_MARKER = "// HUB_PATCH_VERSION 1"
 _PATCH_VERSION_RE = re.compile(r"// HUB_PATCH_VERSION (\d+)")
@@ -73,8 +79,16 @@ _D_DEVICE_RE = re.compile(
     r"(D_DEVICE\(0x[0-9A-Fa-f]{2},0x[0-9A-Fa-f]{2},0x[0-9A-Fa-f]{2},)"
     r"\d+"
     r"(,USB_VID,USB_PID,)0x[0-9A-Fa-f]+"
-    r"(,IMANUFACTURER,IPRODUCT,)(?:ISERIAL|0)"
+    r"(,IMANUFACTURER,IPRODUCT,)(?:ISERIAL|\d+)"
     r"(,1\))"
+)
+_GET_CONFIG_STOCK_RE = re.compile(
+    r"(else if \(GET_CONFIGURATION == r\)\s*\{\s*)"
+    r"Send8\(1\);"
+)
+_GET_CONFIG_FIXED_RE = re.compile(
+    r"else if \(GET_CONFIGURATION == r\)\s*\{\s*"
+    r"Send8\(_usbConfiguration\);"
 )
 _D_HIDREPORT_RE = re.compile(
     r"(D_HIDREPORT\(length\) \{ 9, 0x21, )"
@@ -212,14 +226,6 @@ class IdentityPatcher:
         return content
 
     @staticmethod
-    def patch_usb_core(core_path: Path) -> None:
-        _apply_transform(
-            core_path / "cores" / "arduino" / "USBCore.cpp",
-            IdentityPatcher._usb_core_disable_cdc,
-            "CDC disabled",
-        )
-
-    @staticmethod
     def _boards_txt_content(content: str, device: DeviceInfo) -> str:
         """Rewrite the leonardo identity block; always explicit.
 
@@ -292,15 +298,6 @@ class IdentityPatcher:
                     "stock core."
                 )
         return content
-
-    @staticmethod
-    def patch_boards_txt(core_path: Path, device: DeviceInfo) -> None:
-        _apply_transform(
-            core_path / "boards.txt",
-            lambda c: IdentityPatcher._boards_txt_content(c, device),
-            f"VID/PID {device.vendor_id:04X}:{device.product_id:04X}, "
-            f"strings, identity flags",
-        )
 
     @staticmethod
     def _usbcore_ep0_alloc_content(content: str) -> str:
@@ -384,16 +381,24 @@ class IdentityPatcher:
         second one compiles. Handles stock (ISERIAL/0x100/64) and
         previously-patched forms alike. The declared EP0 size must be
         backed by a matching hardware allocation — see
-        :meth:`_usbcore_ep0_alloc_content`.
+        :meth:`_usbcore_ep0_alloc_content`. iSerialNumber points at
+        string index 3 only when the profile carries a serial number
+        (served from hub_serial_string.h, see
+        :meth:`_usbcore_serial_content`); otherwise 0 — the host never
+        requests it.
         """
         ep0 = int(device.ep0_max_packet_size)
         bcd = f"0x{device.bcd_device:X}"
+        serial_idx = 3 if device.has_serial else 0
 
-        expected = f",{ep0},USB_VID,USB_PID,{bcd},IMANUFACTURER,IPRODUCT,0,1)"
+        expected = (
+            f",{ep0},USB_VID,USB_PID,{bcd},IMANUFACTURER,IPRODUCT,{serial_idx},1)"
+        )
         if expected not in content:
             def repl(m: re.Match[str]) -> str:
                 return (
-                    f"{m.group(1)}{ep0}{m.group(2)}{bcd}{m.group(3)}0{m.group(4)}"
+                    f"{m.group(1)}{ep0}{m.group(2)}{bcd}"
+                    f"{m.group(3)}{serial_idx}{m.group(4)}"
                 )
 
             updated, count = _D_DEVICE_RE.subn(repl, content)
@@ -406,32 +411,127 @@ class IdentityPatcher:
             content = updated
             logger.debug("USBCore.cpp: %d D_DEVICE occurrence(s) rewritten", count)
 
+        content = IdentityPatcher._usbcore_serial_content(content)
         content = IdentityPatcher._usbcore_get_config_content(content)
         return IdentityPatcher._usbcore_ep0_alloc_content(content)
+
+    @staticmethod
+    def _usbcore_serial_content(content: str) -> str:
+        """Serve the profile serial number on GET_DESCRIPTOR(String, iSerial).
+
+        The generated ``hub_serial_string.h`` (written on every patch)
+        defines ``HUB_SERIAL_ENABLED`` + ``HUB_SERIAL_STRING`` when the
+        profile has a serial, and only an empty string otherwise — so a
+        single unconditional include keeps both states compiling. The
+        stock getShortName() fallback (pseudo-random "HIDxx") stays for
+        the no-serial case (unreachable in practice: iSerialNumber is 0,
+        the host never requests string 3). Content-idempotent like the
+        other USBCore edits.
+        """
+        include = '#include "hub_serial_string.h"\n'
+        anchor = "#include <stdlib.h>\n"
+        stock_branch = (
+            "\t\telse if (setup.wValueL == ISERIAL) {\n"
+            "#ifdef PLUGGABLE_USB_ENABLED\n"
+            "\t\t\tchar name[ISERIAL_MAX_LEN];\n"
+            "\t\t\tPluggableUSB().getShortName(name);\n"
+            "\t\t\treturn USB_SendStringDescriptor((uint8_t*)name, strlen(name), 0);\n"
+            "#endif\n"
+            "\t\t}\n"
+        )
+        serial_branch = (
+            "\t\telse if (setup.wValueL == ISERIAL) {\n"
+            "#ifdef HUB_SERIAL_ENABLED\n"
+            "\t\t\treturn USB_SendStringDescriptor(\n"
+            "\t\t\t    (uint8_t*)HUB_SERIAL_STRING, strlen(HUB_SERIAL_STRING), 0);\n"
+            "#else\n"
+            "#ifdef PLUGGABLE_USB_ENABLED\n"
+            "\t\t\tchar name[ISERIAL_MAX_LEN];\n"
+            "\t\t\tPluggableUSB().getShortName(name);\n"
+            "\t\t\treturn USB_SendStringDescriptor((uint8_t*)name, strlen(name), 0);\n"
+            "#endif\n"
+            "#endif\n"
+            "\t\t}\n"
+        )
+        if include not in content:
+            if anchor in content:
+                content = content.replace(anchor, anchor + include, 1)
+                logger.debug("USBCore.cpp: hub_serial_string.h include added")
+            elif "setup.wValueL == ISERIAL" in content:
+                # A real core that still routes string 3 somewhere cannot
+                # be made serial-aware without the header — fail loud.
+                raise PatchError(
+                    "USBCore.cpp: include anchor not found; cannot add "
+                    "hub_serial_string.h include. Re-run 'arduino-hub setup'."
+                )
+            # Neither anchor nor branch: a minimal excerpt (non-compiling
+            # test fixture) — nothing to make serial-aware, skip.
+        if serial_branch not in content:
+            if stock_branch in content:
+                content = content.replace(stock_branch, serial_branch, 1)
+                logger.debug(
+                    "USBCore.cpp: ISERIAL branch routed through hub_serial_string.h"
+                )
+            elif "setup.wValueL == ISERIAL" in content:
+                raise PatchError(
+                    "USBCore.cpp: iSerialNumber branch not found in a "
+                    "recognizable form; cannot route it through "
+                    "hub_serial_string.h. Re-run 'arduino-hub setup'."
+                )
+            # No branch at all: minimal fixture, skip (include presence
+            # alone is harmless — unused defines).
+        return content
+
+    @staticmethod
+    def serial_string_header(device: DeviceInfo) -> str:
+        """Generated ``hub_serial_string.h`` content for a profile."""
+        serial = device.serial_number or ""
+        lines = [
+            "#ifndef HUB_SERIAL_STRING_H",
+            "#define HUB_SERIAL_STRING_H",
+            "",
+            "// Generated by arduino-hub — do not edit.",
+            "// Served on GET_DESCRIPTOR(String, iSerialNumber) when the",
+            "// profile carries a serial number.",
+            "#include <string.h>",
+            "",
+        ]
+        if serial:
+            lines.append("#define HUB_SERIAL_ENABLED 1")
+            lines.append(f'#define HUB_SERIAL_STRING "{serial}"')
+        else:
+            lines.append('#define HUB_SERIAL_STRING ""')
+        lines += ["", "#endif", ""]
+        return "\n".join(lines)
 
     @staticmethod
     def _usbcore_get_config_content(content: str) -> str:
         """Answer GET_CONFIGURATION with the live configuration value.
 
         Stock always returns 1, even before SET_CONFIGURATION (spec
-        requires 0 while unconfigured). One-line, idempotent.
+        requires 0 while unconfigured). Anchored to the GET_CONFIGURATION
+        handler so an unrelated Send8(1) elsewhere can never be patched
+        by accident; a present-but-unrecognized handler is a loud
+        PatchError (same fail-loud contract as D_DEVICE). Contents
+        without any GET_CONFIGURATION handler (minimal test fixtures)
+        are left untouched.
         """
-        fixed = "Send8(_usbConfiguration);"
-        if fixed in content:
+        if _GET_CONFIG_FIXED_RE.search(content):
             return content
-        stock = "Send8(1);"
-        if stock in content:
-            content = content.replace(stock, fixed, 1)
+        if _GET_CONFIG_STOCK_RE.search(content):
+            content = _GET_CONFIG_STOCK_RE.sub(
+                lambda m: f"{m.group(1)}Send8(_usbConfiguration);", content, count=1
+            )
             logger.debug("USBCore.cpp: GET_CONFIGURATION returns live value")
+            return content
+        if "GET_CONFIGURATION ==" in content:
+            raise PatchError(
+                "USBCore.cpp: GET_CONFIGURATION handler not found in a "
+                "recognizable form; cannot patch it to return the live "
+                "configuration value. Re-run 'arduino-hub setup' to restore "
+                "the stock core."
+            )
         return content
-
-    @staticmethod
-    def patch_usbcore(core_path: Path, device: DeviceInfo) -> None:
-        _apply_transform(
-            core_path / "cores" / "arduino" / "USBCore.cpp",
-            lambda c: IdentityPatcher._usbcore_descriptor_content(c, device),
-            f"EP0={device.ep0_max_packet_size}, bcdDevice=0x{device.bcd_device:X}, iSerialNumber 0",
-        )
 
     @staticmethod
     def _usbc_h_attributes_content(content: str) -> str:
@@ -476,14 +576,6 @@ class IdentityPatcher:
             body_old,
             "USB_CONFIG_ATTRIBUTES, USB_CONFIG_POWER_MA(USB_CONFIG_POWER)",
             1,
-        )
-
-    @staticmethod
-    def patch_usbc_h(core_path: Path) -> None:
-        _apply_transform(
-            core_path / "cores" / "arduino" / "USBCore.h",
-            IdentityPatcher._usbc_h_attributes_content,
-            "bmAttributes overridable (USB_CONFIG_ATTRIBUTES)",
         )
 
     @staticmethod
@@ -539,21 +631,6 @@ class IdentityPatcher:
             )
         return content.replace(old, policy)
 
-    @staticmethod
-    def patch_hid(core_path: Path, device: DeviceInfo) -> None:
-        """Patch HID interface: bcdHID+country (HID.h), boot policy (HID.cpp)."""
-        hid_dir = core_path / "libraries" / "HID" / "src"
-        _apply_transform(
-            hid_dir / "HID.h",
-            lambda c: IdentityPatcher._hid_h_identity_content(c, device),
-            f"bcdHID 0x{device.bcd_hid:04X}, country 0x{device.country_code:02X}",
-        )
-        _apply_transform(
-            hid_dir / "HID.cpp",
-            IdentityPatcher._hid_cpp_policy_content,
-            "subclass 1 / protocol 2 (boot mouse policy)",
-        )
-
 
 def _apply_transform(path: Path, transform, description: str) -> None:
     """Read a file, apply a content transform, write back if changed."""
@@ -566,6 +643,7 @@ def _apply_transform(path: Path, transform, description: str) -> None:
         logger.info("%s patched: %s", path.name, description)
     else:
         logger.info("%s already up to date (%s)", path.name, description)
+
 
 class LibraryPatcher:
     """Mouse library + HubCommand install + PC client headers."""
@@ -583,12 +661,23 @@ class LibraryPatcher:
 
     @staticmethod
     def _mouse_cpp_content(content: str) -> str:
-        """Marker-guarded Mouse.cpp edits: includes, descriptor, move()."""
+        """Marker-guarded Mouse.cpp edits: includes, descriptor, move().
+
+        Fail-loud: an anchor that is present but unrecognized (source
+        drift) raises instead of silently shipping stock behaviour with
+        a wrong report format.
+        """
         if '#include "hid_profile.h"' not in content:
             content = content.replace(
                 '#include "Mouse.h"',
                 '#include "Mouse.h"\n#include "hid_profile.h"\n#include "hid_mapper.h"',
             )
+            if '#include "hid_profile.h"' not in content:
+                raise PatchError(
+                    "Mouse.cpp: Mouse.h include not found; cannot add the "
+                    "generated headers. Re-run 'arduino-hub setup' and "
+                    "reinstall the Mouse library."
+                )
 
         if "static HIDSubDescriptor node(HID_DESCRIPTOR" not in content:
             content = re.sub(
@@ -602,15 +691,32 @@ class LibraryPatcher:
                 "static HIDSubDescriptor node(_hidReportDescriptor, sizeof(_hidReportDescriptor));",
                 "static HIDSubDescriptor node(HID_DESCRIPTOR, sizeof(HID_DESCRIPTOR));",
             )
+            if "static HIDSubDescriptor node(HID_DESCRIPTOR" not in content:
+                raise PatchError(
+                    "Mouse.cpp: stock HIDSubDescriptor registration not "
+                    "found in a recognizable form; cannot route it to the "
+                    "generated HID_DESCRIPTOR. Re-run 'arduino-hub setup' "
+                    "and reinstall the Mouse library."
+                )
 
         if "encode_output(state, m)" not in content:
             if _MOUSE_CPP_OLD_MOVE not in content:
-                logger.warning("Mouse.cpp: move() body not found, patch skipped")
-            else:
-                content = content.replace(_MOUSE_CPP_OLD_MOVE, _MOUSE_CPP_NEW_MOVE)
+                raise PatchError(
+                    "Mouse.cpp: stock move() body not found in a "
+                    "recognizable form; the patched build would keep the "
+                    "stock 4-byte report format. Re-run 'arduino-hub "
+                    "setup' and reinstall the Mouse library."
+                )
+            content = content.replace(_MOUSE_CPP_OLD_MOVE, _MOUSE_CPP_NEW_MOVE)
 
         if "Mouse_::buttons(uint16_t b)" not in content:
             content = content.replace("uint8_t b)", "uint16_t b)")
+            if "uint8_t b)" in content:
+                raise PatchError(
+                    "Mouse.cpp: uint8_t button parameters not fully "
+                    "widened to uint16_t. Re-run 'arduino-hub setup' and "
+                    "reinstall the Mouse library."
+                )
 
         return content
 
@@ -623,9 +729,22 @@ class LibraryPatcher:
                 "void move(int16_t x, int16_t y, int16_t wheel = 0, int16_t pan = 0);",
                 content,
             )
+            if "int16_t x, int16_t y, int16_t wheel" not in content:
+                raise PatchError(
+                    "Mouse.h: move() declaration not found in a "
+                    "recognizable form; cannot widen it to int16_t/pan. "
+                    "Re-run 'arduino-hub setup' and reinstall the Mouse "
+                    "library."
+                )
         if "uint16_t _buttons;" not in content:
             content = content.replace("uint8_t _buttons;", "uint16_t _buttons;")
             content = content.replace("uint8_t b", "uint16_t b")
+            if "uint16_t _buttons;" not in content:
+                raise PatchError(
+                    "Mouse.h: _buttons member not found in a recognizable "
+                    "form; cannot widen it to uint16_t. Re-run "
+                    "'arduino-hub setup' and reinstall the Mouse library."
+                )
         return content
 
     @staticmethod
@@ -689,8 +808,7 @@ class LibraryPatcher:
         """Copy the HubCommand device library and generate opcode defs."""
         src_dir = base_dir / HUB_COMMAND_SOURCE_DIR
         if not src_dir.exists():
-            logger.error("HubCommand source library not found: %s", src_dir)
-            return Path()
+            raise PatchError(f"HubCommand source library not found: {src_dir}")
         dst_dir = base_dir / HUB_COMMAND_RELATIVE
         shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
         _atomic_write_text(
@@ -844,7 +962,12 @@ class CommandChannelPatcher:
 
     @staticmethod
     def _patch_hid_h(content: str) -> str:
-        """Apply all HID.h command-channel edits + version marker."""
+        """Apply all HID.h command-channel edits + version marker.
+
+        Every edit is fail-loud: when the anchor is absent (core source
+        drift), the patch raises instead of silently stamping the
+        version over an unpatched file (same contract as D_DEVICE).
+        """
         if HID_H_MARKER not in content:
             content = content.replace(
                 '#include "PluggableUSB.h"\n',
@@ -852,6 +975,12 @@ class CommandChannelPatcher:
                 '#include "hid_command_config.h"\n',
                 1,
             )
+            if HID_H_MARKER not in content:
+                raise PatchError(
+                    "HID.h: PluggableUSB.h include not found in a "
+                    "recognizable form; cannot add the command config "
+                    "include. Re-run 'arduino-hub setup'."
+                )
             logger.info("HID.h: hid_command_config.h include added")
 
         if HID_H_EPTYPE_MARKER not in content:
@@ -860,6 +989,12 @@ class CommandChannelPatcher:
                 "  uint8_t epType[2];\n",
                 1,
             )
+            if HID_H_EPTYPE_MARKER not in content:
+                raise PatchError(
+                    "HID.h: epType[1] member not found in a recognizable "
+                    "form; cannot widen it to epType[2]. Re-run "
+                    "'arduino-hub setup'."
+                )
             logger.info("HID.h: epType widened to [2]")
 
         if HID_H_DESC_MARKER not in content:
@@ -881,6 +1016,12 @@ class CommandChannelPatcher:
                 "} HIDDescriptor;\n",
                 1,
             )
+            if HID_H_DESC_MARKER not in content:
+                raise PatchError(
+                    "HID.h: HIDDescriptor struct not found in a "
+                    "recognizable form; cannot add the OUT endpoint "
+                    "member. Re-run 'arduino-hub setup'."
+                )
             logger.info("HID.h: HIDDescriptor OUT endpoint added")
 
         if "int availableReportPackets();" not in content:
@@ -897,19 +1038,47 @@ class CommandChannelPatcher:
                 "#endif\n",
                 1,
             )
+            if "int availableReportPackets();" not in content:
+                raise PatchError(
+                    "HID.h: SendReport/AppendDescriptor declarations not "
+                    "found in a recognizable form; cannot add the ring "
+                    "receive API. Re-run 'arduino-hub setup'."
+                )
             logger.info("HID.h: ring receive API added")
 
         if HID_H_OUT_API_MARKER not in content:
             content = content.replace(
                 "  int readReportPacket(uint8_t* dst, uint8_t maxlen);\n",
                 "  int readReportPacket(uint8_t* dst, uint8_t maxlen);\n"
-                "#if HID_COMMAND_TRANSPORT == HID_COMMAND_TRANSPORT_INTERRUPT_OUT\n"
+                "#if HID_COMMAND_ENABLED && HID_COMMAND_TRANSPORT == HID_COMMAND_TRANSPORT_INTERRUPT_OUT\n"
                 "  int availableOutReport();\n"
                 "  int readOutReport(uint8_t* dst, uint8_t maxlen);\n"
                 "#endif\n",
                 1,
             )
+            if HID_H_OUT_API_MARKER not in content:
+                raise PatchError(
+                    "HID.h: readReportPacket declaration not found in a "
+                    "recognizable form; cannot add the interrupt-OUT read "
+                    "API. Re-run 'arduino-hub setup'."
+                )
             logger.info("HID.h: interrupt-OUT read API added")
+        else:
+            # v3 migration: cores stamped by HID_H v2 carry the OUT-API
+            # guard without HID_COMMAND_ENABLED — align it with the
+            # matching guards in HID.cpp and CommandTransport.h.
+            old_guard = (
+                "#if HID_COMMAND_TRANSPORT == HID_COMMAND_TRANSPORT_INTERRUPT_OUT\n"
+                "  int availableOutReport();\n"
+            )
+            new_guard = (
+                "#if HID_COMMAND_ENABLED && HID_COMMAND_TRANSPORT == "
+                "HID_COMMAND_TRANSPORT_INTERRUPT_OUT\n"
+                "  int availableOutReport();\n"
+            )
+            if old_guard in content:
+                content = content.replace(old_guard, new_guard, 1)
+                logger.info("HID.h: OUT-API guard aligned with HID_COMMAND_ENABLED (v2 → v3)")
 
         if "_cmdRing[HID_COMMAND_QUEUE_SLOTS]" not in content:
             content = content.replace(
@@ -928,6 +1097,12 @@ class CommandChannelPatcher:
                 "};\n",
                 1,
             )
+            if "_cmdRing[HID_COMMAND_QUEUE_SLOTS]" not in content:
+                raise PatchError(
+                    "HID.h: HID_ class tail not found in a recognizable "
+                    "form; cannot add the ring buffer members. Re-run "
+                    "'arduino-hub setup'."
+                )
             logger.info("HID.h: ring buffer members added")
 
         return CommandChannelPatcher._stamp_version(content, "#define HID_h\n", HID_H_PATCH_VERSION)
@@ -980,6 +1155,12 @@ class CommandChannelPatcher:
             if old in content:
                 content = content.replace(old, new, 1)
                 logger.info("HID.cpp: ring read upgraded (atomic cli/sei)")
+            elif "int HID_::readReportPacket" in content:
+                raise PatchError(
+                    "HID.cpp: readReportPacket() not found in a recognizable "
+                    "form; cannot upgrade the ring read to the atomic "
+                    "cli/sei version. Re-run 'arduino-hub setup'."
+                )
 
         # SET_REPORT: a failed control transfer must not enqueue garbage.
         if "if (!USB_RecvControl(scratch, length))" not in content:
@@ -991,6 +1172,12 @@ class CommandChannelPatcher:
             if old in content:
                 content = content.replace(old, new, 1)
                 logger.info("HID.cpp: SET_REPORT failure check added")
+            elif "USB_RecvControl(scratch, length)" in content:
+                raise PatchError(
+                    "HID.cpp: SET_REPORT USB_RecvControl call not found in "
+                    "a recognizable form; cannot add the control-transfer "
+                    "failure check. Re-run 'arduino-hub setup'."
+                )
 
         # SET_REPORT: zero-pad the ring slot before the copy.
         if "memset(_cmdRing[_cmdHead], 0" not in content:
@@ -1002,13 +1189,60 @@ class CommandChannelPatcher:
             if old in content:
                 content = content.replace(old, new, 1)
                 logger.info("HID.cpp: SET_REPORT slot zero-padding added")
+            elif "memcpy(_cmdRing[_cmdHead], payload, payloadLen);" in content:
+                raise PatchError(
+                    "HID.cpp: SET_REPORT ring copy not found in a "
+                    "recognizable form; cannot add the slot zero-padding. "
+                    "Re-run 'arduino-hub setup'."
+                )
 
         # SendReport: stock ships the report id and the payload as two
         # back-to-back USB packets (2 IN transactions per HID report).
-        # Collapse into a single packet: id followed by payload, one
-        # TRANSFER_RELEASE. Matches both the pristine stock form and
-        # cores already carrying other HUB edits (idempotent: the new
-        # single-send body no longer contains the old pattern).
+        # Collapse into a single packet (see _sendreport_content).
+        content = CommandChannelPatcher._sendreport_content(content)
+
+        # Capability: macro-based blob → generated hid_capability_blob.h.
+        if "_capabilityReport[] PROGMEM" in content:
+            old_blob = re.compile(
+                r"#if HID_COMMAND_ENABLED && HID_CAPABILITY_ENABLED\n"
+                r"static const uint8_t _capabilityReport\[\] PROGMEM = \{[^}]*\};\n"
+                r"#endif\n",
+            )
+            content, count = old_blob.subn(
+                "#if HID_COMMAND_ENABLED && HID_CAPABILITY_ENABLED\n"
+                '#include "hid_capability_blob.h"\n'
+                "#endif\n",
+                content,
+                count=1,
+            )
+            if count == 0:
+                raise PatchError(
+                    "HID.cpp: inline capability blob block not found in a "
+                    "recognizable form; cannot move it to the generated "
+                    "header. Re-run 'arduino-hub setup'."
+                )
+            content = content.replace("_capabilityReport", "HID_CAPABILITY_BLOB")
+            if "_capabilityReport" in content:
+                raise PatchError(
+                    "HID.cpp: stale _capabilityReport references remain "
+                    "after the blob migration. Re-run 'arduino-hub setup'."
+                )
+            logger.info("HID.cpp: capability blob moved to generated header")
+
+        return content
+
+    @staticmethod
+    def _sendreport_content(content: str) -> str:
+        """Collapse HID_::SendReport into a single USB packet.
+
+        Stock ships the report id and the payload as two back-to-back
+        USB packets (2 IN transactions per HID report). The new body
+        sends id+payload with one TRANSFER_RELEASE and guards
+        non-positive len before the VLA. Matches the pristine stock
+        form, the v4-era guard-less single-packet form (healed with one
+        line), and already-current cores (idempotent). Anything else
+        carrying a SendReport definition is a loud PatchError.
+        """
         _SENDREPORT_OLD = (
             "int HID_::SendReport(uint8_t id, const void* data, int len)\n"
             "{\n"
@@ -1024,34 +1258,45 @@ class CommandChannelPatcher:
             "{\n"
             "\t// Single USB packet: report id followed by the payload.\n"
             "\t// (Stock sent id and data as two packets; hosts expect one.)\n"
+            "\tif (len <= 0) return 0;\n"
             "\tuint8_t buf[len + 1];\n"
             "\tbuf[0] = id;\n"
             "\tmemcpy(buf + 1, data, len);\n"
             "\treturn USB_Send(pluggedEndpoint | TRANSFER_RELEASE, buf, len + 1);\n"
             "}\n"
         )
+        # v5: a v4-era core carries the single-packet body without the
+        # len guard — heal it with one line instead of failing loud
+        # below (the guard-less form matches neither OLD nor NEW).
+        _SENDREPORT_V4_NOGUARD = (
+            "int HID_::SendReport(uint8_t id, const void* data, int len)\n"
+            "{\n"
+            "\t// Single USB packet: report id followed by the payload.\n"
+            "\t// (Stock sent id and data as two packets; hosts expect one.)\n"
+            "\tuint8_t buf[len + 1];\n"
+        )
+        if _SENDREPORT_V4_NOGUARD in content:
+            content = content.replace(
+                _SENDREPORT_V4_NOGUARD,
+                _SENDREPORT_V4_NOGUARD.replace(
+                    "\tuint8_t buf[len + 1];\n",
+                    "\tif (len <= 0) return 0;\n"
+                    "\tuint8_t buf[len + 1];\n",
+                    1,
+                ),
+                1,
+            )
+            logger.info("HID.cpp: SendReport len guard added (v4 → v5)")
+
         if _SENDREPORT_OLD in content:
             content = content.replace(_SENDREPORT_OLD, _SENDREPORT_NEW, 1)
             logger.info("HID.cpp: SendReport collapsed to a single USB packet")
-
-        # Capability: macro-based blob → generated hid_capability_blob.h.
-        if "_capabilityReport[] PROGMEM" in content:
-            old_blob = re.compile(
-                r"#if HID_COMMAND_ENABLED && HID_CAPABILITY_ENABLED\n"
-                r"static const uint8_t _capabilityReport\[\] PROGMEM = \{[^}]*\};\n"
-                r"#endif\n",
-                re.DOTALL,
+        elif _SENDREPORT_NEW not in content and "HID_::SendReport" in content:
+            raise PatchError(
+                "HID.cpp: SendReport() not found in a recognizable form; "
+                "cannot collapse it to a single USB packet. Re-run "
+                "'arduino-hub setup' to restore the stock core."
             )
-            content = old_blob.sub(
-                "#if HID_COMMAND_ENABLED && HID_CAPABILITY_ENABLED\n"
-                '#include "hid_capability_blob.h"\n'
-                "#endif\n",
-                content,
-                count=1,
-            )
-            content = content.replace("_capabilityReport", "HID_CAPABILITY_BLOB")
-            logger.info("HID.cpp: capability blob moved to generated header")
-
         return content
 
     @staticmethod
@@ -1076,6 +1321,12 @@ class CommandChannelPatcher:
                 "#endif",
                 1,
             )
+            if "#ifndef HID_EP_INTERVAL" not in content:
+                raise PatchError(
+                    "HID.cpp: HID.h include not found in a recognizable "
+                    "form; cannot insert the HID_EP_INTERVAL guard. "
+                    "Re-run 'arduino-hub setup'."
+                )
 
         # Every interrupt-endpoint descriptor (IN and, once added below,
         # OUT) references the macro instead of a hardcoded 1 ms.
@@ -1083,6 +1334,11 @@ class CommandChannelPatcher:
             "USB_ENDPOINT_TYPE_INTERRUPT, USB_EP_SIZE, 0x01)",
             "USB_ENDPOINT_TYPE_INTERRUPT, USB_EP_SIZE, HID_EP_INTERVAL)",
         )
+        if "USB_ENDPOINT_TYPE_INTERRUPT, USB_EP_SIZE, 0x01)" in content:
+            raise PatchError(
+                "HID.cpp: endpoint descriptor interval literal not fully "
+                "routed through HID_EP_INTERVAL. Re-run 'arduino-hub setup'."
+            )
 
         # Spec-correct answers for the remaining class requests: hosts
         # that probe them currently get an empty packet (GET_PROTOCOL)
@@ -1100,6 +1356,12 @@ class CommandChannelPatcher:
                 "\t\t}",
                 1,
             )
+            if "USB_SendControl(0, &protocol, 1)" not in content:
+                raise PatchError(
+                    "HID.cpp: HID_GET_PROTOCOL handler not found in a "
+                    "recognizable form; cannot add the spec answer. "
+                    "Re-run 'arduino-hub setup'."
+                )
         if "USB_SendControl(0, &idle, 1)" not in content:
             content = content.replace(
                 "\t\tif (request == HID_GET_IDLE) {\n"
@@ -1112,6 +1374,12 @@ class CommandChannelPatcher:
                 "\t\t}",
                 1,
             )
+            if "USB_SendControl(0, &idle, 1)" not in content:
+                raise PatchError(
+                    "HID.cpp: HID_GET_IDLE handler not found in a "
+                    "recognizable form; cannot add the spec answer. "
+                    "Re-run 'arduino-hub setup'."
+                )
         # ──────────────────────────────────────────────────────────
 
         # Capability blob: serve the generated header, never inline the
@@ -1126,6 +1394,12 @@ class CommandChannelPatcher:
                 "HID_& HID()\n{",
                 1,
             )
+            if '#include "hid_capability_blob.h"' not in content:
+                raise PatchError(
+                    "HID.cpp: HID() factory not found in a recognizable "
+                    "form; cannot include the capability blob header. "
+                    "Re-run 'arduino-hub setup'."
+                )
             logger.info("HID.cpp: capability blob header included")
 
         if "setup.wValueL == HID_CAPABILITY_REPORT_ID" not in content:
@@ -1148,6 +1422,12 @@ class CommandChannelPatcher:
                 "\t\t}",
                 1,
             )
+            if "setup.wValueL == HID_CAPABILITY_REPORT_ID" not in content:
+                raise PatchError(
+                    "HID.cpp: HID_GET_REPORT handler not found in a "
+                    "recognizable form; cannot add the capability "
+                    "readback. Re-run 'arduino-hub setup'."
+                )
             logger.info("HID.cpp: GET_REPORT capability readback added")
 
         if "USB_RecvControl(scratch, length)" not in content:
@@ -1220,6 +1500,12 @@ class CommandChannelPatcher:
                 "\t\t}",
                 1,
             )
+            if "USB_RecvControl(scratch, length)" not in content:
+                raise PatchError(
+                    "HID.cpp: HID_SET_REPORT handler not found in a "
+                    "recognizable form; cannot add the command ring. "
+                    "Re-run 'arduino-hub setup'."
+                )
             logger.info("HID.cpp: SET_REPORT bounded ring copy added")
 
         # Constructor: claim a second endpoint (OUT) only for
@@ -1238,6 +1524,12 @@ class CommandChannelPatcher:
                 "    1, epType),\n",
                 1,
             )
+            if "PluggableUSBModule(1, 1, epType)" in content:
+                raise PatchError(
+                    "HID.cpp: HID_ constructor not found in a recognizable "
+                    "form; cannot make the endpoint count transport-"
+                    "dependent. Re-run 'arduino-hub setup'."
+                )
             logger.info("HID.cpp: constructor endpoint count patched")
 
         if "_cmdHead = 0;" not in content:
@@ -1253,6 +1545,12 @@ class CommandChannelPatcher:
                 "\tPluggableUSB().plug(this);\n",
                 1,
             )
+            if "_cmdHead = 0;" not in content:
+                raise PatchError(
+                    "HID.cpp: HID_ constructor body not found in a "
+                    "recognizable form; cannot add the ring buffer init. "
+                    "Re-run 'arduino-hub setup'."
+                )
             logger.info("HID.cpp: constructor ring buffer init added")
 
         if HID_CPP_EP_OUT_MARKER not in content:
@@ -1264,6 +1562,12 @@ class CommandChannelPatcher:
                 "#endif\n",
                 1,
             )
+            if HID_CPP_EP_OUT_MARKER not in content:
+                raise PatchError(
+                    "HID.cpp: epType[0] assignment not found in a "
+                    "recognizable form; cannot add the OUT endpoint type. "
+                    "Re-run 'arduino-hub setup'."
+                )
             logger.info("HID.cpp: constructor OUT endpoint added")
 
         # Interface descriptor: two endpoints (IN + OUT) only for
@@ -1302,6 +1606,12 @@ class CommandChannelPatcher:
                 "}\n",
                 1,
             )
+            if HID_CPP_GETIFACE_MARKER not in content:
+                raise PatchError(
+                    "HID.cpp: getInterface() not found in a recognizable "
+                    "form; cannot add the OUT endpoint descriptor. Re-run "
+                    "'arduino-hub setup'."
+                )
             logger.info("HID.cpp: getInterface OUT endpoint added")
 
         # Ring read implementation (SET_REPORT transports).
@@ -1339,6 +1649,12 @@ class CommandChannelPatcher:
                 "#endif /* if defined(USBCON) */",
                 1,
             )
+            if HID_CPP_MARKER not in content:
+                raise PatchError(
+                    "HID.cpp: file tail not found in a recognizable form; "
+                    "cannot add the ring read API. Re-run "
+                    "'arduino-hub setup'."
+                )
             logger.info("HID.cpp: ring read API implemented")
 
         # Interrupt OUT read implementation. The report id travels as
@@ -1377,6 +1693,12 @@ class CommandChannelPatcher:
                 "#endif /* if defined(USBCON) */",
                 1,
             )
+            if HID_CPP_OUT_MARKER not in content:
+                raise PatchError(
+                    "HID.cpp: file tail not found in a recognizable form; "
+                    "cannot add the interrupt-OUT read API. Re-run "
+                    "'arduino-hub setup'."
+                )
             logger.info("HID.cpp: interrupt-OUT read API implemented")
 
         return CommandChannelPatcher._stamp_version(
@@ -1431,10 +1753,15 @@ def build_patch_edits(
     add_transform(
         core_path / "cores" / "arduino" / "USBCore.cpp",
         f"EP0={device.ep0_max_packet_size}, bcdDevice=0x{device.bcd_device:X}, "
-        f"iSerialNumber 0, CDC disabled",
+        f"iSerialNumber {'3 (profile serial)' if device.has_serial else '0'}, CDC disabled",
         lambda c: IdentityPatcher._usbcore_descriptor_content(
             IdentityPatcher._usb_core_disable_cdc(c), device
         ),
+    )
+    add_content(
+        core_path / "cores" / "arduino" / "hub_serial_string.h",
+        "profile serial number (HUB_SERIAL_STRING)",
+        IdentityPatcher.serial_string_header(device),
     )
     add_transform(
         core_path / "cores" / "arduino" / "USBCore.h",
@@ -1559,7 +1886,9 @@ def build_manifest_patches(
         ),
         "USBCore.cpp": (
             f"EP0={device.ep0_max_packet_size} (descriptor + USB_EP0_ALLOC), "
-            f"bcdDevice 0x{device.bcd_device:X}, iSerialNumber 0, CDC disabled"
+            f"bcdDevice 0x{device.bcd_device:X}, "
+            f"iSerialNumber {'3 (profile serial via hub_serial_string.h)' if device.has_serial else '0'}, "
+            f"CDC disabled"
         ),
         "USBCore.h": f"bmAttributes overridable (USB_CONFIG_ATTRIBUTES=0x{device.bm_attributes:02X})",
         "HID.h": (
@@ -1596,11 +1925,22 @@ def write_patch_manifest(
     build_dir = base_dir / ".build"
     build_dir.mkdir(parents=True, exist_ok=True)
 
-    generated = {}
-    for fname in ("hid_profile.h", "hid_mapper.h"):
-        fpath = build_dir.parent / MOUSE_LIB_RELATIVE / fname
+    generated: dict[str, str] = {}
+
+    def _hash_existing(fpath: Path) -> None:
         if fpath.exists():
-            generated[fname] = hashlib.sha256(fpath.read_bytes()).hexdigest()[:16]
+            generated[fpath.name] = hashlib.sha256(fpath.read_bytes()).hexdigest()[:16]
+
+    mouse_lib_dir = build_dir.parent / MOUSE_LIB_RELATIVE
+    _hash_existing(mouse_lib_dir / "hid_profile.h")
+    _hash_existing(mouse_lib_dir / "hid_mapper.h")
+    # The serial header lives inside the AVR core (version-dependent
+    # path); the manifest records whichever copy is on disk, if any.
+    core_data = build_dir.parent / "arduino-cli-data"
+    if core_data.exists():
+        for candidate in sorted(core_data.rglob("hub_serial_string.h")):
+            _hash_existing(candidate)
+            break
 
     manifest = {
         "device": device_name,
