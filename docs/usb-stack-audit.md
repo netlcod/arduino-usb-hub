@@ -849,20 +849,20 @@ int HID_::SendReport(uint8_t id, const void* data, int len) {
 | **bNumInterfaces** | `USBCore.cpp:503` | Динамический (PluggableUSB) | Нет | |
 | **bConfigurationValue** | `USBDesc.h:273` | Да (в макросе) | Нет | Фикс. 1 |
 | **iConfiguration** | `USBDesc.h:273` | Да (в макросе) | Нет | 0 (нет строки) |
-| **bmAttributes** | `USBDesc.h:273`, `USBCore.h:93-96` | Да (патч макроса) | Нет | Bus Powered + Remote Wakeup |
-| **bMaxPower** | `USBCore.h:99-102` | Да `-DUSB_CONFIG_POWER=100` | Нет | 500 mА по умолчанию |
+| **bmAttributes** | `USBDesc.h:273`, `USBCore.h:93-96` | Да (`-DUSB_CONFIG_ATTRIBUTES` + guard) | Нет | Сток: Bus Powered + Remote Wakeup; патчится из профиля (`bm_attributes`) |
+| **bMaxPower** | `USBCore.h:99-102` | Да `-DUSB_CONFIG_POWER=<max_power_ma>` | Нет | 500 mА по умолчанию; патчится из профиля (IdentityPatcher) |
 | **bLength** (Interface) | `USBDesc.h:275-276` | Нет (фикс. 9) | Стандарт USB | |
 | **bInterfaceNumber** | `HID.cpp:33` | Автоматически (PluggableUSB) | Нет | |
 | **bAlternateSetting** | `USBDesc.h:276` | Да (в макросе) | Нет | 0 |
 | **bNumEndpoints** | `HID.cpp:33` | Да (в макросе) | **Max 6** (минус EP0) | 1 (только IN) |
 | **bInterfaceClass** | `HID.cpp:33` | Да | Нет | 0x03 (HID) |
-| **bInterfaceSubClass** | `HID.cpp:33` | Да | Нет | **0 (NONE!) — КРИТИЧНО** |
-| **bInterfaceProtocol** | `HID.cpp:33` | Да | Нет | **0 (NONE!) — КРИТИЧНО** |
+| **bInterfaceSubClass** | `HID.cpp:33` | Да | Нет | Сток: 0 (NONE). Закрыто boot-политикой патчера (1/2 при boot-mouse) |
+| **bInterfaceProtocol** | `HID.cpp:33` | Да | Нет | Сток: 0 (NONE). Закрыто boot-политикой патчера |
 | **iInterface** | `USBDesc.h:276` | Да (в макросе) | Нет | 0 |
 | **bLength** (HID) | `HID.h:121` макрос `D_HIDREPORT` | Нет (фикс. 9) | Стандарт HID | |
 | **bDescriptorType** (HID) | `HID.h:121` | Нет (0x21) | Стандарт HID | |
-| **bcdHID** | `HID.h:121` | Да (патч макроса) | Нет | **1.01 (должен быть 1.11)** |
-| **bCountryCode** | `HID.h:121` | Да (патч макроса) | Нет | **1 (US)** |
+| **bcdHID** | `HID.h:121` | Да (патч `D_HIDREPORT`) | Нет | Сток 1.01; патчится из профиля (`bcd_hid`, оба байта — IdentityPatcher) |
+| **bCountryCode** | `HID.h:121` | Да (патч `D_HIDREPORT`) | Нет | Сток на проводе **0 (not localized)** — ранняя версия этого аудита ошибочно читала 1 (US) по C-структуре; патчится из профиля (`country_code`) |
 | **bNumDescriptors** | `HID.h:121` | Нет (фикс. 1) | Стандарт HID | |
 | **bDescriptorType** (Report) | `HID.h:121` | Нет (0x22) | Стандарт HID | |
 | **wDescriptorLength** (Report) | `HID.h:121` | Динамический | Нет | Сумма всех `HIDSubDescriptor` |
@@ -870,12 +870,12 @@ int HID_::SendReport(uint8_t id, const void* data, int len) {
 | **bLength** (Endpoint) | `USBDesc.h:278-279` | Нет (фикс. 7) | Стандарт USB | |
 | **bEndpointAddress** | `HID.cpp:35` | Автоматически | **Max 6 EP + EP0 = 7** | IN endpoint |
 | **bmAttributes** | `HID.cpp:35` | Да | Тип: Interrupt/ Bulk/ Iso | 0x03 (Interrupt) |
-| **wMaxPacketSize** | `HID.cpp:35`, `USBAPI.h:38` | Да `-DUSB_EP_SIZE=16` | **Max 64 (double-buffered)** | 64 по умолчанию |
-| **bInterval** | `HID.cpp:35` | Да | Min 1 мс | **1 мс (очень часто)** |
+| **wMaxPacketSize** | `HID.cpp:35`, `USBAPI.h:38` | Да `-DUSB_EP_SIZE=<ep_max_packet_size>` | **Max 64 (double-buffered)** | Сток 64; патчер задаёт из профиля (16/32/64, ветка `InitEndpoints` пропатчена) |
+| **bInterval** | `HID.cpp:35` | Да (`HID_EP_INTERVAL`) | Min 1 мс | Сток 1 мс; патчится из профиля (`ep_interval_ms`) |
 | **Language ID** | `USBCore.cpp:39-42` | Да (патч массива) | Нет | Только 0x0409 (English) |
 | **Product String** | `USBCore.cpp:49`, `platform.txt:142` | Да `build.usb_product` | Нет | |
 | **Manufacturer String** | `USBCore.cpp:66`, `platform.txt:142` | Да `build.usb_manufacturer` | Нет | |
-| **Serial Number** | `USBCore.cpp:544-550`, `HID.cpp:65-73` | Да (патч: `ISERIAL→0`) | Нет | Патчер всегда ставит iSerialNumber=0 (как у G305). Устройства с реальным серийником его теряют — ограничение, решать в сессии полного клона |
+| **Serial Number** | `USBCore.cpp:544-550`, `HID.cpp:65-73` | Да (патч) | Нет | Закрыто serial-parity: профиль с серийником → `D_DEVICE …,IPRODUCT,3,1)` + generated `hub_serial_string.h`; без серийника → `IPRODUCT,0,1)` (как у G305) |
 | **GET_STATUS** | `USBCore.cpp:586-599` | Да (исходники) | Нет | Endpoint status = всегда 0 — wontfix: HALT у interrupt-IN мыши не встречается, бенигн |
 | **GET_DESCRIPTOR** | `USBCore.cpp:514-561` | Да (расширяемо) | Нет | |
 | **SET_ADDRESS** | `USBCore.cpp:617-621` | Да | Нет | |
@@ -905,13 +905,13 @@ int HID_::SendReport(uint8_t id, const void* data, int len) {
 
 ### Критические (для клонирования HID-мыши):
 
-1. **`HID_SUBCLASS_BOOT_INTERFACE` и `HID_PROTOCOL_MOUSE`** (`HID.cpp:33`) — должны быть установлены для совместимости с BIOS/KVM. Сейчас — NONE/NONE.
+1. ~~`HID_SUBCLASS_BOOT_INTERFACE` и `HID_PROTOCOL_MOUSE`~~ — закрыто: boot-политика патчера ставит 1/2 для boot-mouse клонов.
 
-2. **`bInterval = 1 мс`** (`HID.cpp:35`) — крайне агрессивный polling. Для клонирования конкретной мыши надо знать её реальный bInterval (обычно 8-10 мс для офисной, 1-2 мс для игровой).
+2. ~~`bInterval = 1 мс`~~ — закрыто: `-DHID_EP_INTERVAL` из профиля (`ep_interval_ms`, валидация min 1).
 
-3. **`bMaxPower = 500 мА`** (`USBCore.h:101`) — нереалистично для мыши, может вызвать проблемы с USB-хабами.
+3. ~~`bMaxPower = 500 мА`~~ — закрыто: `-DUSB_CONFIG_POWER` из профиля (`max_power_ma`, валидация 1..500).
 
-4. **`bcdHID = 1.01`** (`HID.h:121`) — должен быть 1.11.
+4. ~~`bcdHID = 1.01`~~ — закрыто: оба байта + bCountryCode патчатся из профиля (`bcd_hid`, `country_code`; см. enumeration-identity-parity §3.1).
 
 5. ~~Отсутствует реализация `HID_GET_REPORT`, `HID_GET_PROTOCOL`, `HID_GET_IDLE`~~ — закрыто: capability readback + spec-ответы (v3).
 
@@ -919,8 +919,8 @@ int HID_::SendReport(uint8_t id, const void* data, int len) {
 
 7. **PLL не отключается при suspend** — wontfix (см. таблицу).
 
-8. **Serial Number**: патчер ставит `iSerialNumber=0` (как у G305); устройства с реальным серийником — ограничение до сессии полного клона.
+8. ~~**Serial Number**: патчер ставит `iSerialNumber=0`~~ — закрыто: serial-parity (String Descriptor 3 из профиля, generated `hub_serial_string.h`).
 
 9. ~~Report ID отдельным пакетом~~ — закрыто: `SendReport` одним пакетом (v4).
 
-10. **`bRemoteWakeup` флаг всегда включён в конфигурации** — даже если клонируемое устройство его не поддерживает.
+10. ~~**`bRemoteWakeup` флаг всегда включён в конфигурации**~~ — закрыто: `-DUSB_CONFIG_ATTRIBUTES` из профиля (`bm_attributes`) через guard в `USBCore.h`.
