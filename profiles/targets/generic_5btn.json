@@ -1,24 +1,24 @@
 {
   "name": "generic_5btn",
   "report_id": 1,
-  "report_length": 4,
+  "report_length": 6,
   "buttons": 5,
   "layout": "arduino",
   "axes": [
     {
       "usage_page": "0x01",
       "usage": "0x30",
-      "bits": 8,
-      "logical_min": -127,
-      "logical_max": 127,
+      "bits": 16,
+      "logical_min": -32767,
+      "logical_max": 32767,
       "relative": true
     },
     {
       "usage_page": "0x01",
       "usage": "0x31",
-      "bits": 8,
-      "logical_min": -127,
-      "logical_max": 127,
+      "bits": 16,
+      "logical_min": -32767,
+      "logical_max": 32767,
       "relative": true
     },
     {

@@ -97,10 +97,11 @@ def test_generic_5btn_encode_mask():
     c = _constants(header)
     assert c["TGT_BUTTONS_DATA_BITS"] == 5
 
-    # All 5 buttons (bits 0-4, incl. XButton1=0x08, XButton2=0x10).
-    assert _encode(header, target, 0x1F, 10, 0, 0, 0) == bytes.fromhex("1f 0a 00 00")
+    # All 5 buttons (bits 0-4, incl. XButton1=0x08, XButton2=0x10);
+    # X is little-endian int16.
+    assert _encode(header, target, 0x1F, 10, 0, 0, 0) == bytes.fromhex("1f 0a 00 00 00 00")
     # Bit 5 (0x20) is beyond the 5-bit field and must be masked out.
-    assert _encode(header, target, 0x20, 0, 0, 0, 0) == bytes.fromhex("00 00 00 00")
+    assert _encode(header, target, 0x20, 0, 0, 0, 0) == bytes.fromhex("00 00 00 00 00 00")
 
 
 def test_generic_3btn_encode_mask():
