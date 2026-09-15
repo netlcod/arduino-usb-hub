@@ -135,6 +135,17 @@ def validate_identity(device: DeviceInfo) -> list[ValidationIssue]:
             )
         )
 
+    if device.ep_max_packet_size not in _EP0_SIZES:
+        issues.append(
+            ValidationIssue(
+                ERROR,
+                "ep_max_packet_size",
+                f"interrupt EP wMaxPacketSize={device.ep_max_packet_size} is "
+                f"not one of 8/16/32/64; the USB_EP_ALLOC bank map only "
+                f"supports these sizes (patch blocked)",
+            )
+        )
+
     if not 1 <= device.max_power_ma <= 500:
         # bMaxPower outside the spec produces an invalid descriptor on
         # the wire (units of 2 mA, legal range 1..250 units) — fail fast

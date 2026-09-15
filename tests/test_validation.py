@@ -254,6 +254,15 @@ def test_ep0_outside_standard_sizes_errors():
     assert validate_identity(_device(ep0_max_packet_size=32)) == []
 
 
+def test_ep_size_outside_standard_sizes_errors():
+    # Interrupt EP banks map only {8, 16, 32, 64} (USB_EP_ALLOC).
+    issues = validate_identity(_device(ep_max_packet_size=24))
+    assert has_errors(issues)
+    assert "ep_max_packet_size" in _fields(issues)
+    for size in (8, 16, 32, 64):
+        assert validate_identity(_device(ep_max_packet_size=size)) == []
+
+
 def test_power_rules():
     out_of_range = validate_identity(_device(max_power_ma=600))
     assert any(i.field == "max_power_ma" and "1..500" in i.message for i in out_of_range)

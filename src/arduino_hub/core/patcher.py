@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 CDC_COMMENT_MARKER = "// CDC_GetInterface(&interfaces);"
 CDC_DISABLED_FLAG = "-DCDC_DISABLED"
-USB_EP_SIZE_FLAG = "-DUSB_EP_SIZE=16"
+USB_EP_SIZE_FLAG = "-DUSB_EP_SIZE={ep_max_packet_size}"
 USB_CONFIG_POWER_FLAG = "-DUSB_CONFIG_POWER={max_power_ma}"
 USB_VERSION_FLAG = "-DUSB_VERSION=0x{usb_version:04X}"
 USB_CONFIG_ATTRIBUTES_FLAG = "-DUSB_CONFIG_ATTRIBUTES=0x{bm_attributes:02X}"
@@ -274,7 +274,9 @@ class IdentityPatcher:
         flags = " ".join(
             [
                 CDC_DISABLED_FLAG,
-                USB_EP_SIZE_FLAG,
+                USB_EP_SIZE_FLAG.format(
+                    ep_max_packet_size=int(device.ep_max_packet_size)
+                ),
                 USB_CONFIG_POWER_FLAG.format(max_power_ma=device.max_power_ma),
                 USB_VERSION_FLAG.format(usb_version=device.usb_version),
                 USB_CONFIG_ATTRIBUTES_FLAG.format(bm_attributes=device.bm_attributes),
@@ -413,7 +415,69 @@ class IdentityPatcher:
 
         content = IdentityPatcher._usbcore_serial_content(content)
         content = IdentityPatcher._usbcore_get_config_content(content)
+        content = IdentityPatcher._usbcore_init_endpoints_content(content)
         return IdentityPatcher._usbcore_ep0_alloc_content(content)
+
+    @staticmethod
+    def _usbcore_init_endpoints_content(content: str) -> str:
+        """Route data-endpoint bank allocation through -DUSB_EP_SIZE.
+
+        Stock InitEndpoints() only handles USB_EP_SIZE 16 (single bank)
+        and 64 (double bank) — 8 and 32 hit ``#error``. The patch swaps
+        the inline #if/#elif ladder for a ``USB_EP_ALLOC`` macro map, so
+        the interrupt endpoint's wMaxPacketSize follows the profile's
+        ``ep_max_packet_size`` (boards.txt -> -DUSB_EP_SIZE=N). Bank
+        codes follow stock semantics: 8/16/32 single-banked
+        (0x02/0x12/0x22), 64 double-banked (0x36). EP_SINGLE_8 /
+        EP_SINGLE_32 defines are added by
+        :meth:`_usbcore_ep0_alloc_content` (shared with the EP0 map);
+        unused branches never expand, so compile-time resolution only
+        needs the selected size's constant — and the pipeline always
+        applies both edits before the sketch builds.
+        """
+        if "USB_EP_ALLOC" in content:
+            return content
+        old_ladder = (
+            "#if USB_EP_SIZE == 16\n"
+            "\t\tUECFG1X = EP_SINGLE_16;\n"
+            "#elif USB_EP_SIZE == 64\n"
+            "\t\tUECFG1X = EP_DOUBLE_64;\n"
+            "#else\n"
+            "#error Unsupported value for USB_EP_SIZE\n"
+            "#endif"
+        )
+        if old_ladder not in content:
+            raise PatchError(
+                "USBCore.cpp: InitEndpoints() bank ladder not found in a "
+                "recognizable form; cannot route it through USB_EP_ALLOC. "
+                "Re-run 'arduino-hub setup'."
+            )
+        content = content.replace(old_ladder, "\t\tUECFG1X = USB_EP_ALLOC;", 1)
+
+        anchor = "#define EP_SINGLE_16 0x12"
+        if anchor not in content:
+            raise PatchError(
+                "USBCore.cpp: EP_SINGLE_16 define not found; cannot insert "
+                "the USB_EP_ALLOC bank map. Re-run 'arduino-hub setup'."
+            )
+        additions = (
+            "// HUB_PATCH: data-endpoint banks follow -DUSB_EP_SIZE\n"
+            "// (8/16/32 single bank, 64 double bank — stock semantics).\n"
+            "#if USB_EP_SIZE == 8\n"
+            "#define USB_EP_ALLOC EP_SINGLE_8\n"
+            "#elif USB_EP_SIZE == 16\n"
+            "#define USB_EP_ALLOC EP_SINGLE_16\n"
+            "#elif USB_EP_SIZE == 32\n"
+            "#define USB_EP_ALLOC EP_SINGLE_32\n"
+            "#elif USB_EP_SIZE == 64\n"
+            "#define USB_EP_ALLOC EP_DOUBLE_64\n"
+            "#else\n"
+            "#error Unsupported value for USB_EP_SIZE\n"
+            "#endif\n"
+        )
+        content = content.replace(anchor, anchor + "\n" + additions, 1)
+        logger.info("USBCore.cpp: InitEndpoints routed through USB_EP_ALLOC")
+        return content
 
     @staticmethod
     def _usbcore_serial_content(content: str) -> str:
@@ -1747,12 +1811,14 @@ def build_patch_edits(
     add_transform(
         core_path / "boards.txt",
         f"VID/PID {device.vendor_id:04X}:{device.product_id:04X}, strings, "
-        f"CDC off, EP_SIZE=16, power/bcdUSB/bmAttributes/bInterval flags",
+        f"CDC off, EP_SIZE={device.ep_max_packet_size}, "
+        f"power/bcdUSB/bmAttributes/bInterval flags",
         lambda c: IdentityPatcher._boards_txt_content(c, device),
     )
     add_transform(
         core_path / "cores" / "arduino" / "USBCore.cpp",
-        f"EP0={device.ep0_max_packet_size}, bcdDevice=0x{device.bcd_device:X}, "
+        f"EP0={device.ep0_max_packet_size}, EP_SIZE={device.ep_max_packet_size}, "
+        f"bcdDevice=0x{device.bcd_device:X}, "
         f"iSerialNumber {'3 (profile serial)' if device.has_serial else '0'}, CDC disabled",
         lambda c: IdentityPatcher._usbcore_descriptor_content(
             IdentityPatcher._usb_core_disable_cdc(c), device
@@ -1878,7 +1944,8 @@ def build_manifest_patches(
     patches = {
         "boards.txt": (
             f"VID/PID {device.vendor_id:04X}:{device.product_id:04X}, strings, "
-            f"CDC_DISABLED, USB_EP_SIZE=16, USB_CONFIG_POWER={device.max_power_ma}, "
+            f"CDC_DISABLED, USB_EP_SIZE={int(device.ep_max_packet_size)}, "
+            f"USB_CONFIG_POWER={device.max_power_ma}, "
             f"USB_VERSION=0x{device.usb_version:04X}, "
             f"USB_CONFIG_ATTRIBUTES=0x{device.bm_attributes:02X}, "
             f"HID_EP_INTERVAL=0x{max(1, device.ep_interval_ms):02X}, "
@@ -1886,6 +1953,7 @@ def build_manifest_patches(
         ),
         "USBCore.cpp": (
             f"EP0={device.ep0_max_packet_size} (descriptor + USB_EP0_ALLOC), "
+            f"EP_SIZE={device.ep_max_packet_size} (USB_EP_ALLOC bank map), "
             f"bcdDevice 0x{device.bcd_device:X}, "
             f"iSerialNumber {'3 (profile serial via hub_serial_string.h)' if device.has_serial else '0'}, "
             f"CDC disabled"

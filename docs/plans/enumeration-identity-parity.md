@@ -289,3 +289,5 @@ enumeration на 33-м байте. Финальный фикс: маска за�
 Поле профиля `ep_max_packet_size` инертно (размер interrupt-endpoint'ов
 задаётся захардкоженным `-DUSB_EP_SIZE=16`) — не путать с
 `ep0_max_packet_size`, который патчится.
+*(устарело, 2026-09: поле патчится по образцу EP0 — `-DUSB_EP_SIZE=N` +
+макрос `USB_EP_ALLOC` в `InitEndpoints()`; см. AGENTS.md Gotchas.)*

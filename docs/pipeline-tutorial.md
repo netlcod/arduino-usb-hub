@@ -128,10 +128,10 @@ arduino-hub flash --device g305 --target generic_5btn \
    `mouse_commands.h` и поля capability).
 2. **Валидация профиля** (`core/validation.py: validate_identity`) — до любых
    записей: ERROR (кавычки/бэкслеш/контрол-символы в строках, пустые строки —
-   ломают `-D` флаги; `ep0_max_packet_size` вне {8,16,32,64} — ломает
-   enumeration без CDC-запасного пути) останавливают patch; WARN (длины >126,
-   VID↔производитель по `KNOWN_VENDORS` — актуально для ручных правок профиля,
-   диапазоны power/bcdUSB/интервал) логируются и попадают в манифест.
+   ломают `-D` флаги; `ep0_max_packet_size` и `ep_max_packet_size` вне
+   {8,16,32,64} — ломают allocation банков) останавливают patch; WARN (длины
+   >126, VID↔производитель по `KNOWN_VENDORS` — актуально для ручных правок
+   профиля, диапазоны power/bcdUSB/интервал) логируются и попадают в манифест.
 3. Все правки вычисляются **в памяти** как список `FileEdit`
    (`build_patch_edits()`); затем либо пишутся атомарно
    (`apply_edits()`: tmp + `os.replace`), либо печатаются диффом
@@ -141,13 +141,16 @@ arduino-hub flash --device g305 --target generic_5btn \
    со стоком):
    - отключение CDC в `USBCore.cpp`;
    - `boards.txt`: `build.vid/pid`, `usb_product/manufacturer`,
-     `extra_flags` = `{build.usb_flags} -DCDC_DISABLED -DUSB_EP_SIZE=16
+     `extra_flags` = `{build.usb_flags} -DCDC_DISABLED -DUSB_EP_SIZE=<wMaxPacketSize>
      -DUSB_CONFIG_POWER=<mA> -DUSB_VERSION=0x<bcdUSB>
      -DUSB_CONFIG_ATTRIBUTES=0x<bmAttributes> -DHID_EP_INTERVAL=0x<bInterval>`;
-     `USB_EP_SIZE=16` — чтобы interrupt-пакеты были по 16 байт
-     (совместимость с hidapi-буфером `[ID][payload]`);
+     `USB_EP_SIZE` — размер interrupt-EP из профиля (`ep_max_packet_size`,
+     банк выделяется макросом `USB_EP_ALLOC` в USBCore.cpp: 8/16/32 →
+     single bank, 64 → double bank);
    - `USBCore.cpp`: в обеих ветках `D_DEVICE(...)` — EP0 maxPacketSize ←
-     устройства, bcdDevice ← устройства, iSerialNumber → 0;
+     устройства, bcdDevice ← устройства, iSerialNumber → 0; `InitEndpoints()`
+     — банк данных через `USB_EP_ALLOC` (стоковая лесенка 16/64 → карта
+     8/16/32/64);
    - `USBCore.h`: guard `#ifndef USB_CONFIG_ATTRIBUTES` вокруг атрибутов
      конфигурации в `D_CONFIG` (версия `// HUB_PATCH_VERSION 1`);
    - `HID.h`: литерал `D_HIDREPORT` переписывается целиком — **оба байта**

@@ -642,6 +642,25 @@ static bool SendControl(u8 d)
 \treturn true;
 }
 
+static void InitEndpoints()
+{
+\tfor (u8 i = 1; i < sizeof(_initEndpoints) && _initEndpoints[i] != 0; i++)
+\t{
+\t\tUENUM = i;
+\t\tUECONX = (1<<EPEN);
+\t\tUECFG0X = _initEndpoints[i];
+#if USB_EP_SIZE == 16
+\t\tUECFG1X = EP_SINGLE_16;
+#elif USB_EP_SIZE == 64
+\t\tUECFG1X = EP_DOUBLE_64;
+#else
+#error Unsupported value for USB_EP_SIZE
+#endif
+\t}
+\tUERST = 0x7E;\t// And reset them
+\tUERST = 0;
+}
+
 static void core_init(void)
 {
 \tInitEP(0,EP_TYPE_CONTROL,EP_SINGLE_64);\t// init ep0
@@ -680,6 +699,25 @@ static bool SendControl(u8 d)
 {
 \tif (!((_cmark + 1) & 0x3F))
 \t\tClearIN();
+}
+
+static void InitEndpoints()
+{
+\tfor (u8 i = 1; i < sizeof(_initEndpoints) && _initEndpoints[i] != 0; i++)
+\t{
+\t\tUENUM = i;
+\t\tUECONX = (1<<EPEN);
+\t\tUECFG0X = _initEndpoints[i];
+#if USB_EP_SIZE == 16
+\t\tUECFG1X = EP_SINGLE_16;
+#elif USB_EP_SIZE == 64
+\t\tUECFG1X = EP_DOUBLE_64;
+#else
+#error Unsupported value for USB_EP_SIZE
+#endif
+\t}
+\tUERST = 0x7E;\t// And reset them
+\tUERST = 0;
 }
 
 static void core_init(void)
@@ -779,8 +817,44 @@ def test_usbcore_descriptor_patches_ep0_bcd_serial():
     assert "if (!((_cmark + 1) % USB_EP0_MAX_PACKET))" in out
     assert "(_cmark + 1) & 0x3F" not in out
 
+    # Data-endpoint banks route through USB_EP_ALLOC (default profile
+    # EP size 16 → single bank, stock semantics).
+    assert "\t\tUECFG1X = USB_EP_ALLOC;" in out
+    assert "#define USB_EP_ALLOC EP_SINGLE_16" in out
+    assert "#elif USB_EP_SIZE == 64" not in out.split("USB_EP_ALLOC")[1]
+
     # Idempotent.
     assert IdentityPatcher._usbcore_descriptor_content(out, device) == out
+
+
+def test_usbcore_init_endpoints_follows_profile():
+    for size, bank in ((8, "EP_SINGLE_8"), (16, "EP_SINGLE_16"),
+                       (32, "EP_SINGLE_32"), (64, "EP_DOUBLE_64")):
+        device = _identity_device(ep_max_packet_size=size)
+        out = IdentityPatcher._usbcore_descriptor_content(
+            STOCK_USBCORE_CPP, device
+        )
+        assert f"#define USB_EP_ALLOC {bank}" in out
+        # Inline ladder replaced: UECFG1X is no longer selected by the
+        # old #if/#elif (the #error in the USB_EP_ALLOC map stays — it
+        # guards unsupported sizes).
+        assert "\t\tUECFG1X = EP_SINGLE_16;\n" not in out
+        assert "\t\tUECFG1X = EP_DOUBLE_64;\n" not in out
+        assert "\t\tUECFG1X = USB_EP_ALLOC;" in out
+        # Idempotent.
+        assert IdentityPatcher._usbcore_descriptor_content(out, device) == out
+
+
+def test_usbcore_init_endpoints_unrecognized_form_raises():
+    import pytest
+
+    from arduino_hub.exceptions import PatchError
+
+    weird = STOCK_USBCORE_CPP.replace(
+        "\t\tUECFG1X = EP_SINGLE_16;\n", "\t\tUECFG1X = EP_SINGLE_16_1;\n"
+    )
+    with pytest.raises(PatchError):
+        IdentityPatcher._usbcore_descriptor_content(weird, _identity_device())
 
 
 def test_usbcore_descriptor_serial_parity():
@@ -1026,6 +1100,11 @@ def test_boards_txt_carries_all_identity_flags():
     updated = IdentityPatcher._boards_txt_content(content, _identity_device(ep_interval_ms=8))
     assert "-DHID_EP_INTERVAL=0x08" in updated
 
+    # EP size follows the profile (G305 receiver: 32).
+    updated = IdentityPatcher._boards_txt_content(content, _identity_device(ep_max_packet_size=32))
+    assert "-DUSB_EP_SIZE=32" in updated
+    assert "-DUSB_EP_SIZE=16" not in updated
+
 
 def test_build_patch_edits_apply_and_dry_run(tmp_path):
     """Full edit computation on a synthetic install; apply once -> all
@@ -1084,6 +1163,7 @@ def test_build_patch_edits_apply_and_dry_run(tmp_path):
     assert "InitEP(0,EP_TYPE_CONTROL,USB_EP0_ALLOC);" in diff
     assert "+\t\tif (!((_cmark + 1) % USB_EP0_MAX_PACKET))" in diff
     assert "-\t\tif (!((_cmark + 1) & 0x3F))" in diff
+    assert "-DUSB_EP_SIZE=32" in diff
 
     assert apply_edits(edits) == len(edits)
 
@@ -1104,5 +1184,9 @@ def test_build_patch_edits_apply_and_dry_run(tmp_path):
     assert "#define USB_EP0_ALLOC EP_SINGLE_32" in usbcpp
     assert "(_cmark + 1) % USB_EP0_MAX_PACKET" in usbcpp
     assert "& 0x3F" not in usbcpp
+    assert "UECFG1X = USB_EP_ALLOC;" in usbcpp
+    assert "#define USB_EP_ALLOC EP_SINGLE_32" in usbcpp
+    assert "\t\tUECFG1X = EP_SINGLE_16;\n" not in usbcpp
+    assert "\t\tUECFG1X = EP_DOUBLE_64;\n" not in usbcpp
     hid_h = (hid_src / "HID.h").read_text(encoding="utf-8")
     assert "{ 9, 0x21, 0x11, 0x01, 0x00, 1, 0x22," in hid_h
