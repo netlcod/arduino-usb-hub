@@ -92,7 +92,22 @@ tests/
 | `HID.cpp` | subclass/protocol из HID policy (BOOT_MOUSE → 1/2), не из JSON |
 | `Mouse.cpp` | стабилен: `#include "hid_profile.h"` + `#include "hid_mapper.h"`; вызовы decode→encode→SendReport |
 
-Не трогаем: EP0 (остаётся 64), endpoint (16), boot mode compatibility, HID++, consumer/vendor interfaces, WinUSB.
+Не трогаем: EP0 (остаётся 64), boot mode compatibility, consumer/vendor interfaces, WinUSB.
+
+## Канал команд: текущий (самодельный) vs полное маскирование
+
+Текущий командный канал (usage page 0xFF00, report id 3/4, transport
+feature/output/interrupt_out) — **добавка к fingerprint**: у оригинала её нет
+(у G305 interface MI_01 input-only; двунаправленный HID++ сидит на отдельном
+вендорном интерфейсе ресивера). Для текущих целей (управление клоном со стороны
+бота) это принято осознанно.
+
+**Решение зафиксировано (2026-09):** для *полного маскирования* (клон
+неотличим от оригинала под анализом) команды бота должны ходить по каналу,
+который предоставляет сам ресивер-оригинал — вендорному интерфейсу HID++ —
+а не по самодельному. До этого момента самодельный канал остаётся основным;
+при внедрении HID++-транспорта он становится fallback/dev-режимом или
+убирается. См. `docs/plans/receiver-full-clone.md`.
 
 ## Этапы
 
