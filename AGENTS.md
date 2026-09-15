@@ -25,6 +25,13 @@ python -m venv .venv
 pip install -e ".[dev]"
 ```
 
+## Workflow
+
+- **Commit after each phase**: every completed phase of a plan/document
+  (refactoring R-phases, investigation experiments, full-clone phases)
+  is committed separately — green tests first, then a focused commit
+  describing that phase. Do not batch multiple phases into one commit.
+
 ## Architecture
 
 ```
@@ -43,7 +50,8 @@ src/arduino_hub/
   core/
     installer.py     — ArduinoCoreInstaller: ensure_version(), find_path()
     patcher.py       — IdentityPatcher (D_DEVICE/bcdDevice/iSerialNumber+serial,
-                       boards.txt, USBCore.h guard, D_HIDREPORT, boot policy),
+                       boards.txt, USBCore.h guard, D_HIDREPORT, boot policy,
+                       USB_EP_ALLOC bank map in InitEndpoints),
                        CommandChannelPatcher
                        (write_hid_command_config, write_hid_capability_blob,
                        patch_hid_command_core — versioned via
@@ -91,7 +99,7 @@ profiles/
   protocol/mouse.json — command protocol source of truth
 targets detail:
   generic_3btn.json   — Arduino Mouse compatible (3 btn, 8-bit X/Y/Wheel), command off
-  generic_5btn.json   — 5 btn (XButton1/XButton2), 8-bit X/Y/Wheel, command interrupt_out
+  generic_5btn.json   — 5 btn (XButton1/XButton2), 16-bit X/Y + 8-bit Wheel, command interrupt_out
   generic_16btn.json  — full clone: 16 btn, 16-bit X/Y, Wheel, AC Pan, ReportID 2, command feature
 ```
 
@@ -158,7 +166,7 @@ Device: core HID → CommandTransport → MouseCommandHandler → Mouse API
 |-----------|-------------|
 | `setup`   | Download Arduino CLI (to `.build/tools/`), install AVR core |
 | `clone --name <n> --report <p>` | Parse USB Device Tree Viewer report → `profiles/sources/<n>.json` |
-| `patch --device <n> --target <t> [--client-out <dir>] [--dry-run]` | CDC disable + полная identity-паритетность (VID/PID, строки, bcdDevice, **EP0 maxPacketSize**, **bcdUSB**, **bmAttributes** через guard в USBCore.h, **bCountryCode**, bcdHID оба байта) + boot mouse policy + command channel (core SET/GET_REPORT ring, interrupt OUT endpoint, HubCommand lib, PC headers) + generate Mouse library headers + валидация профиля + манифест; `--client-out` копирует заголовки PC-клиента наружу; `--dry-run` печатает unified diff всех правок без записи |
+| `patch --device <n> --target <t> [--client-out <dir>] [--dry-run]` | CDC disable + полная identity-паритетность (VID/PID, строки, bcdDevice, **EP0 maxPacketSize**, **EP maxPacketSize (interrupt EP)**, **bcdUSB**, **bmAttributes** через guard в USBCore.h, **bCountryCode**, bcdHID оба байта) + boot mouse policy + command channel (core SET/GET_REPORT ring, interrupt OUT endpoint, HubCommand lib, PC headers) + generate Mouse library headers + валидация профиля + манифест; `--client-out` копирует заголовки PC-клиента наружу; `--dry-run` печатает unified diff всех правок без записи |
 | `compile --sketch <p>` | Compile sketch only |
 | `flash --device <n> --target <t> --sketch <p> --port <x>` | Patch + compile + upload |
 
@@ -171,9 +179,9 @@ Patch state is recorded in `.build/patches.json`.
 ## Gotchas
 
 - **After flashing, CDC is disabled**: Leonardo becomes a cloned HID device with no serial port. To re-flash, hold reset button, run flash command, release reset when upload starts (see README Warning section).
-- **Identity-поля патчатся всегда явно** (принцип): состав `extra_flags` (`-DUSB_VERSION`, `-DUSB_CONFIG_ATTRIBUTES`, `-DHID_EP_INTERVAL`, `-DUSB_EP0_MAX_PACKET`) и литералы дескрипторов пересобираются на каждом `patch` независимо от того, совпадает ли значение со стоком — правка профиля подхватывается без «детекции изменений по VID/PID».
+- **Identity-поля патчатся всегда явно** (принцип): состав `extra_flags` (`-DUSB_VERSION`, `-DUSB_CONFIG_ATTRIBUTES`, `-DHID_EP_INTERVAL`, `-DUSB_EP0_MAX_PACKET`, `-DUSB_EP_SIZE`) и литералы дескрипторов пересобираются на каждом `patch` независимо от того, совпадает ли значение со стоком — правка профиля подхватывается без «детекции изменений по VID/PID».
 - **`bMaxPacketSize0` < 64 требует двух синхронных правок, иначе enumeration умирает**: (1) поле в `D_DEVICE` + аллокация банка через `-DUSB_EP0_MAX_PACKET=N`/макрос `USB_EP0_ALLOC` вокруг `InitEP(0,...)`; (2) **root cause невидимых устройств** — стоковый `SendControl` решает «банк полон» по жёсткой маске `(_cmark+1) & 0x3F` (каждые 64 байта): при банке 32 байт №33 пишется в полный FIFO и `WaitForINOrOUT()` зависает навсегда внутри control-ISR (конфиг-дескриптор 41 байт = смерть на 33-м байте; device descriptor 18 байт при этом читается). Патчер заменяет маску на `% USB_EP0_MAX_PACKET`. Симптомы до фикса: «сбой запроса дескриптора конфигурации» (банк 64/декларация 32) или полное исчезновение устройства с замороженным LED (банк 32 без фикса маски).
-- **`ep_max_packet_size` профиля сейчас инертен**: размер interrupt-endpoint'ов задан захардкоженным `-DUSB_EP_SIZE=16` (совместимость с hidapi-буфером). Поле хранится в профиле, но в сборку не попадает — не путать с `ep0_max_packet_size`, который патчится.
+- **`ep_max_packet_size` профиля патчится** (2026-09, по образцу EP0): `-DUSB_EP_SIZE=N` в `extra_flags` + пропатченный `InitEndpoints()` в USBCore.cpp — стоковая лесенка `#if USB_EP_SIZE == 16/#elif 64` заменена макросом `USB_EP_ALLOC` (8/16/32 → single bank, 64 → double bank; другие размеры = `#error`). hidapi-буфер клиента от размера EP не зависит (размеры репортов определяются report-дескриптором), репорты ≤16 Б влезают в банк 32 без изменений. Не путать с `ep0_max_packet_size` (дескриптор + `USB_EP0_ALLOC` + маска `SendControl`).
 - **`D_HIDREPORT` в HID.h следует wire-layout спеки, а не соседней структуре**: байт 2 = bcdHID LOW, байт 3 = HIGH, байт 4 = country (структура `HIDDescDescriptor` с полем `addr` вводит в заблуждение). Патчер пишет оба байта bcdHID + country; старые ядра с патчем «только младший байт» (на проводе было 0x1101 вместо 0x0111) мигрируются автоматически.
 - **USBCore.h теперь тоже патчится** (`#ifndef USB_CONFIG_ATTRIBUTES` guard, версия `// HUB_PATCH_VERSION 1`): повторный `setup` (перезакачка core) откатывает все правки ядра — штатный путь отката.
 - **GET_IDLE/GET_PROTOCOL отвечают данными** (`USB_SendControl(0, &idle|&protocol, 1)`, v3 патча): до этого GET_IDLE ставился в stall, GET_PROTOCOL возвращал пустой пакет.
@@ -201,3 +209,4 @@ Patch state is recorded in `.build/patches.json`.
 - **The command channel rides the existing HID interface** (vendor collection, usage page 0xFF00): no second USB interface. `interrupt_out` adds a second *endpoint* (IN+OUT) on that same interface; feature/output keep a single IN endpoint. The mouse collection stays byte-identical to target-only builds; PC client selects the vendor top-level collection via `hid_enumerate` + usage page filter.
 - **Button arguments are logical numbers (1..16)**, mapped to bits in MouseCommandHandler — the protocol is independent of target layout (works for 3/5/16-button targets).
 - **Re-patch before flashing after editing `profiles/targets/*.json` or `profiles/protocol/mouse.json`**: the patch step regenerates device headers (core config, hid_profile) AND `pc_client/target/*`; the flashed firmware and the built client must come from the same patch run.
+- **Full masking requires the receiver-provided channel, not our own** (decision 2026-09): the self-made command channel (usage page 0xFF00, report id 3/4) is a fingerprint add-on the original does not have. For a full clone, bot commands must ride the receiver's own vendor interface (HID++) instead; until then the self-made channel stays the default and the HID++ transport becomes fallback/dev-only. See `docs/plans/receiver-full-clone.md` and `docs/plans/hid-clone-architecture.md` (channel section).
