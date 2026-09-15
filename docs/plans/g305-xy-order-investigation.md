@@ -1,6 +1,6 @@
 # Расследование: G305 — порядок X/Y в репортах за USB Host Shield
 
-Статус: **в работе** (Фаза 0).
+Статус: **в работе** (Фаза 0; E5-скетч готов — см. Фазу 1).
 
 ## Контекст и установленные факты
 
@@ -102,6 +102,32 @@ X в дампе Фазы 0-A (стала ли Y-first).
 | E2 | Убрать `SetIdle` | F4 |
 | E3 | Активировать все HID-интерфейсы композита (клавиатура/consumer/system) | F2 |
 | E4 | Повторить вендорные транзакции из Фазы 0-C (если есть) | F1 |
+| E5 | `HIDUniversal` + свой парсер вместо `HIDBoot` (report-протокол тот же) | F1/F3/F4: тот же протокол, **другой путь активации** — без `SET_PROTOCOL` и `SetIdle`, с чтением полного report descriptor'а |
+
+E5-прецедент: `mustaffxx/usb-host-shield-mouse` (G502 за тем же щитом,
+`HIDUniversal` + report-протокол). Bitность данных роли не играет — её
+определяет report descriptor ресивера (X/Y 16-бит в 9-байтовом репорте и
+так); меняется только набор control-транзакций активации. Если под
+HIDUniversal порядок станет Y-first — фактор найден (какая транзакция:
+сравнить с E1/E2); если нет — F1/F3/F4 ослаблены.
+
+E5 готов (2026-09): `examples/xy_probe/` — `HIDComposite` с
+`SelectInterface` (только мышиный интерфейс, protocol 2), без
+`SET_PROTOCOL` (в отличие от `HIDBoot(&Usb, true)`); сырой дамп
+`RPT <hex>` (только изменившиеся репорты — ресивер стримит нули на
+1 кГц). Процедура: удалить `-DCDC_DISABLED` из boards.txt (уже сделано
+в текущем дереве), затем
+
+```powershell
+.build\tools\arduino-cli.exe compile --config-file arduino-cli.yaml --fqbn arduino:avr:leonardo examples\xy_probe
+.build\tools\arduino-cli.exe upload   --config-file arduino-cli.yaml -p COM6 --fqbn arduino:avr:leonardo examples\xy_probe  # reset-танец
+.build\tools\arduino-cli.exe monitor  --config-file arduino-cli.yaml -p COM6 --config baudrate=115200
+```
+
+Скетч ждёт открытия монитора (`while (!Serial)`), затем печатает
+`READY` + до 60 дамп-строк. Эталон сравнения — дамп Фазы 0-A (та же
+процедура движений). Восстановление: обычный `arduino-hub patch/flash`
+(вернёт `-DCDC_DISABLED` идемпотентно).
 
 Порядок определяется результатами Фазы 0 (сначала ближайший к найденной
 разнице).
